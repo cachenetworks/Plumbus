@@ -1,7 +1,7 @@
 FROM node:22-alpine AS base
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
 
 FROM base AS development
@@ -11,11 +11,9 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
 FROM base AS build
 RUN npm run build
 
-FROM node:22-alpine AS production
-WORKDIR /app
-COPY package*.json ./
-RUN npm install --omit=dev && npm cache clean --force
-COPY --from=build /app/dist ./dist
-RUN npm install -g serve@14
-EXPOSE 5173
-CMD ["serve", "-s", "dist", "-l", "5173"]
+FROM nginx:1.27-alpine AS production
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://localhost/healthz || exit 1
