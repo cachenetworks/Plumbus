@@ -1,12 +1,13 @@
 from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.models import Movie, MovieMedia, PlaybackToken, User
 from app.security.security import random_token, token_hash
+from app.services.settings import ApplicationSettingsService
 
 
 class PlaybackService:
@@ -14,18 +15,39 @@ class PlaybackService:
         self.db = db
 
     def select_best_media(self, movie: Movie) -> MovieMedia:
-        media = self.db.scalars(
+        prefs = ApplicationSettingsService(self.db).playback()
+        preferred_codec = str(prefs["preferred_video_codec"]).lower()
+        preferred_resolution = str(prefs["preferred_resolution"]).lower()
+        max_bitrate = int(prefs["max_stream_bitrate_kbps"])
+
+        candidates = self.db.scalars(
             select(MovieMedia)
-            .where(MovieMedia.movie_id == movie.id)
-            .order_by(MovieMedia.height.desc().nullslast(), MovieMedia.bitrate.desc().nullslast())
-        ).first()
-        if not media or not media.part_key:
+            .where(MovieMedia.movie_id == movie.id, MovieMedia.part_key.is_not(None))
+            .order_by(
+                case((MovieMedia.video_codec.ilike(preferred_codec), 0), else_=1),
+                case((MovieMedia.resolution.ilike(preferred_resolution), 0), else_=1),
+                case((MovieMedia.bitrate <= max_bitrate, 0), else_=1),
+                MovieMedia.height.desc().nullslast(),
+                MovieMedia.bitrate.desc().nullslast(),
+            )
+        ).all()
+        if not candidates:
             raise HTTPException(409, "No playable Plex media part is indexed for this movie")
-        return media
+        return candidates[0]
 
     def get_media_info(self, media: MovieMedia) -> dict:
+        prefs = ApplicationSettingsService(self.db).playback()
         codec = (media.video_codec or "").lower()
-        direct_play = codec in {"h264", "avc", "hevc", "h265"} and (media.container or "").lower() in {"mp4", "mkv"}
+        container = (media.container or "").lower()
+        direct_play = codec in {"h264", "avc", "hevc", "h265"} and container in {"mp4", "mkv"}
+        bitrate_ok = media.bitrate is None or media.bitrate <= int(prefs["max_stream_bitrate_kbps"])
+        preferred_codec = codec in {str(prefs["preferred_video_codec"]).lower(), "avc" if str(prefs["preferred_video_codec"]).lower() == "h264" else ""}
+        if direct_play and bitrate_ok and preferred_codec:
+            playback_mode = "Direct Play"
+        elif direct_play and bitrate_ok:
+            playback_mode = "Direct Stream"
+        else:
+            playback_mode = "Transcode Required"
         return {
             "container": media.container,
             "video_codec": media.video_codec,
@@ -35,7 +57,9 @@ class PlaybackService:
             "height": media.height,
             "bitrate": media.bitrate,
             "hdr": media.hdr,
+            "playback_mode": playback_mode,
             "direct_play_candidate": direct_play,
+            "allow_plex_transcoding": bool(prefs["allow_plex_transcoding"]),
         }
 
     def create_token(
