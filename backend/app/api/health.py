@@ -38,9 +38,12 @@ def redis_health(actor: User = Depends(require_role(Role.SUPPORT))) -> dict:
 
 
 @router.get("/health/plex")
-def plex_health(actor: User = Depends(require_role(Role.SUPPORT))) -> dict:
+def plex_health(
+    actor: User = Depends(require_role(Role.SUPPORT)),
+    db: Session = Depends(get_db),
+) -> dict:
     del actor
-    info = PlexService().connect()
+    info = PlexService.from_db(db).connect()
     if not info.connected:
         raise HTTPException(503, "plex unavailable")
     return {"status": "ok", "server_name": info.name, "version": info.version}
