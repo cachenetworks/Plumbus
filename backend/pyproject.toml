@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "plumbus-backend"
 version = "0.1.0"
@@ -29,6 +33,11 @@ dev = [
   "respx>=0.22,<1",
   "ruff>=0.9,<1",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+namespaces = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
