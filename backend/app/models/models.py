@@ -26,7 +26,6 @@ class UserStatus(str, enum.Enum):
 
 class User(Base):
     __tablename__ = "users"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     discord_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(80))
@@ -41,7 +40,6 @@ class User(Base):
 
 class OAuthState(Base):
     __tablename__ = "oauth_states"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     flow: Mapped[str] = mapped_column(String(16))
@@ -53,7 +51,6 @@ class OAuthState(Base):
 
 class Session(Base):
     __tablename__ = "sessions"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     session_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -66,7 +63,6 @@ class Session(Base):
 
 class Invitation(Base):
     __tablename__ = "invitations"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     label: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -84,7 +80,6 @@ class Invitation(Base):
 class InvitationRedemption(Base):
     __tablename__ = "invitation_redemptions"
     __table_args__ = (UniqueConstraint("invitation_id", "user_id", name="uq_invite_user_redemption"),)
-
     id: Mapped[int] = mapped_column(primary_key=True)
     invitation_id: Mapped[int] = mapped_column(ForeignKey("invitations.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -94,7 +89,6 @@ class InvitationRedemption(Base):
 
 class PlexServer(Base):
     __tablename__ = "plex_servers"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     base_url: Mapped[str] = mapped_column(String(512))
     token_ciphertext: Mapped[str] = mapped_column(Text)
@@ -108,7 +102,6 @@ class PlexServer(Base):
 class PlexLibrary(Base):
     __tablename__ = "plex_libraries"
     __table_args__ = (UniqueConstraint("server_id", "plex_key", name="uq_plex_library_key"),)
-
     id: Mapped[int] = mapped_column(primary_key=True)
     server_id: Mapped[int] = mapped_column(ForeignKey("plex_servers.id", ondelete="CASCADE"), index=True)
     plex_key: Mapped[str] = mapped_column(String(64))
@@ -121,11 +114,7 @@ class PlexLibrary(Base):
 
 class Movie(Base):
     __tablename__ = "movies"
-    __table_args__ = (
-        UniqueConstraint("library_id", "rating_key", name="uq_movie_library_rating_key"),
-        Index("ix_movies_title_year", "title", "year"),
-    )
-
+    __table_args__ = (UniqueConstraint("library_id", "rating_key", name="uq_movie_library_rating_key"), Index("ix_movies_title_year", "title", "year"))
     id: Mapped[int] = mapped_column(primary_key=True)
     library_id: Mapped[int] = mapped_column(ForeignKey("plex_libraries.id", ondelete="CASCADE"), index=True)
     rating_key: Mapped[str] = mapped_column(String(64), index=True)
@@ -142,18 +131,16 @@ class Movie(Base):
     edition_title: Mapped[str | None] = mapped_column(String(160), nullable=True)
     poster_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     art_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    plex_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     plex_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     local_overrides: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-
     media_versions: Mapped[list["MovieMedia"]] = relationship(cascade="all, delete-orphan")
 
 
 class MovieMedia(Base):
     __tablename__ = "movie_media"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
     plex_media_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -174,7 +161,6 @@ class MovieMedia(Base):
 class MovieTag(Base):
     __tablename__ = "movie_tags"
     __table_args__ = (UniqueConstraint("movie_id", "kind", "value", name="uq_movie_tag"),)
-
     id: Mapped[int] = mapped_column(primary_key=True)
     movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(32), index=True)
@@ -183,7 +169,6 @@ class MovieTag(Base):
 
 class PlaybackToken(Base):
     __tablename__ = "playback_tokens"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -199,7 +184,6 @@ class PlaybackToken(Base):
 class PlaybackHistory(Base):
     __tablename__ = "playback_history"
     __table_args__ = (UniqueConstraint("user_id", "movie_id", name="uq_history_user_movie"),)
-
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
@@ -211,7 +195,6 @@ class PlaybackHistory(Base):
 
 class PlexScanJob(Base):
     __tablename__ = "plex_scan_jobs"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     library_id: Mapped[int | None] = mapped_column(ForeignKey("plex_libraries.id", ondelete="SET NULL"), nullable=True, index=True)
     mode: Mapped[str] = mapped_column(String(32), index=True)
@@ -228,7 +211,6 @@ class PlexScanJob(Base):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-
     id: Mapped[int] = mapped_column(primary_key=True)
     actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     event: Mapped[str] = mapped_column(String(120), index=True)
@@ -237,12 +219,11 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    event_metadata: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
 
 
 class ApplicationSetting(Base):
     __tablename__ = "application_settings"
-
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
