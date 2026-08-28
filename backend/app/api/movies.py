@@ -87,12 +87,7 @@ def browse(
     stmt = _base_query(user)
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(
-            or_(
-                Movie.title.ilike(like),
-                exists().where(MovieTag.movie_id == Movie.id, MovieTag.value.ilike(like)),
-            )
-        )
+        stmt = stmt.where(or_(Movie.title.ilike(like), exists().where(MovieTag.movie_id == Movie.id, MovieTag.value.ilike(like))))
     if year:
         stmt = stmt.where(Movie.year == year)
     if genre:
@@ -104,6 +99,16 @@ def browse(
     stmt = stmt.order_by(Movie.added_at.desc().nullslast(), Movie.title.asc()).offset(offset).limit(limit)
     movies = db.scalars(stmt).unique().all()
     return {"items": [_movie_dict(movie, db) for movie in movies], "offset": offset, "limit": limit}
+
+
+@router.get("/search/suggest")
+def search_suggest(
+    q: str = Query(min_length=1, max_length=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    movies = db.scalars(_base_query(user).where(Movie.title.ilike(f"%{q}%")).order_by(Movie.title).limit(8)).all()
+    return [{"id": m.id, "title": m.title, "year": m.year} for m in movies]
 
 
 @router.get("/{movie_id}")
@@ -118,16 +123,6 @@ def movie_detail(
     return _movie_dict(movie, db, detail=True)
 
 
-@router.get("/search/suggest")
-def search_suggest(
-    q: str = Query(min_length=1, max_length=100),
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> list[dict]:
-    movies = db.scalars(_base_query(user).where(Movie.title.ilike(f"%{q}%")).order_by(Movie.title).limit(8)).all()
-    return [{"id": m.id, "title": m.title, "year": m.year} for m in movies]
-
-
 art_router = APIRouter(tags=["artwork"])
 
 
@@ -138,7 +133,7 @@ def _art(movie_id: int, attr: str, user: User, db: Session) -> Response:
     plex_path = getattr(movie, attr)
     if not plex_path:
         raise HTTPException(404, "Artwork unavailable")
-    upstream = PlexService().artwork_response(plex_path)
+    upstream = PlexService.from_db(db).artwork_response(plex_path)
     if upstream.status_code != 200:
         raise HTTPException(502, "Plex artwork unavailable")
     return Response(
