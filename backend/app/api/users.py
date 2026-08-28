@@ -26,51 +26,18 @@ def _assert_can_manage(actor: User, target: User) -> None:
 
 
 def _audit(db: Session, actor: User, event: str, target: User, request: Request, metadata: dict | None = None) -> None:
-    db.add(
-        AuditLog(
-            actor_user_id=actor.id,
-            event=event,
-            target_type="user",
-            target_id=str(target.id),
-            ip=request.client.host if request.client else None,
-            user_agent=request.headers.get("user-agent"),
-            metadata=metadata or {},
-        )
-    )
+    db.add(AuditLog(actor_user_id=actor.id, event=event, target_type="user", target_id=str(target.id), ip=request.client.host if request.client else None, user_agent=request.headers.get("user-agent"), event_metadata=metadata or {}))
 
 
 @router.get("")
-def list_users(
-    actor: User = Depends(require_role(Role.SUPPORT)),
-    db: Session = Depends(get_db),
-) -> list[dict]:
+def list_users(actor: User = Depends(require_role(Role.SUPPORT)), db: Session = Depends(get_db)) -> list[dict]:
     del actor
     users = db.scalars(select(User).order_by(User.registered_at.desc()).limit(500)).all()
-    return [
-        {
-            "id": u.id,
-            "discord_id": u.discord_id,
-            "username": u.username,
-            "global_name": u.global_name,
-            "avatar": u.avatar,
-            "role": u.role.value,
-            "status": u.status.value,
-            "joined": u.registered_at,
-            "last_login": u.last_login_at,
-            "invite_id": u.invite_id,
-        }
-        for u in users
-    ]
+    return [{"id":u.id,"discord_id":u.discord_id,"username":u.username,"global_name":u.global_name,"avatar":u.avatar,"role":u.role.value,"status":u.status.value,"joined":u.registered_at,"last_login":u.last_login_at,"invite_id":u.invite_id} for u in users]
 
 
 @router.patch("/{user_id}/role")
-def change_role(
-    user_id: int,
-    payload: RoleChange,
-    request: Request,
-    actor: User = Depends(require_role(Role.ADMIN)),
-    db: Session = Depends(get_db),
-) -> dict:
+def change_role(user_id: int, payload: RoleChange, request: Request, actor: User = Depends(require_role(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, "User not found")
@@ -88,13 +55,7 @@ def change_role(
 
 
 @router.patch("/{user_id}/status")
-def change_status(
-    user_id: int,
-    payload: StatusChange,
-    request: Request,
-    actor: User = Depends(require_role(Role.ADMIN)),
-    db: Session = Depends(get_db),
-) -> dict:
+def change_status(user_id: int, payload: StatusChange, request: Request, actor: User = Depends(require_role(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, "User not found")
@@ -105,23 +66,14 @@ def change_status(
             raise HTTPException(409, "Cannot disable the final active SuperAdmin")
     previous = target.status
     target.status = payload.status
-    event = {
-        UserStatus.SUSPENDED: "user.suspended",
-        UserStatus.BANNED: "user.banned",
-        UserStatus.ACTIVE: "user.unsuspended",
-    }[payload.status]
-    _audit(db, actor, event, target, request, {"from": previous.value, "to": payload.status.value})
+    event = {UserStatus.SUSPENDED:"user.suspended",UserStatus.BANNED:"user.banned",UserStatus.ACTIVE:"user.unsuspended"}[payload.status]
+    _audit(db, actor, event, target, request, {"from":previous.value,"to":payload.status.value})
     db.commit()
-    return {"id": target.id, "status": target.status.value}
+    return {"id":target.id,"status":target.status.value}
 
 
 @router.delete("/{user_id}", status_code=204)
-def delete_user(
-    user_id: int,
-    request: Request,
-    actor: User = Depends(require_role(Role.SUPERADMIN)),
-    db: Session = Depends(get_db),
-) -> None:
+def delete_user(user_id: int, request: Request, actor: User = Depends(require_role(Role.SUPERADMIN)), db: Session = Depends(get_db)) -> None:
     target = db.get(User, user_id)
     if not target:
         raise HTTPException(404, "User not found")
