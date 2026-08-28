@@ -47,6 +47,12 @@ def _assert_plex_url(plex: PlexService, url: str) -> None:
         raise HTTPException(400, "Invalid Plex transcode resource")
 
 
+def _plex_media_headers(plex: PlexService) -> dict[str, str]:
+    headers = plex._headers()
+    headers.pop("Accept", None)
+    return headers
+
+
 def _hls_proxy_url(raw_token: str, upstream_url: str) -> str:
     opaque = encrypt_secret(upstream_url)
     return f"{settings.APP_URL}/stream/{raw_token}/hls/{opaque}"
@@ -138,8 +144,7 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
     if not plex.base_url or not plex.token:
         raise HTTPException(503, "Plex is not configured")
     upstream_url = plex.stream_url(media.part_key)
-    headers = plex._headers()
-    headers.pop("Accept", None)
+    headers = _plex_media_headers(plex)
     range_header = request.headers.get("range")
     if range_header:
         headers["Range"] = range_header
@@ -187,7 +192,7 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
 
 @router.get("/stream/{raw_token}/master.m3u8")
 def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
-    token, _user, movie, media = _active_playback(raw_token, db)
+    _token, _user, movie, media = _active_playback(raw_token, db)
     media_info = PlaybackService(db).get_media_info(media)
     if not media_info["allow_plex_transcoding"]:
         raise HTTPException(409, "Plex transcoding is disabled")
@@ -208,7 +213,12 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
         video_resolution=resolution,
     )
     _assert_plex_url(plex, upstream_url)
-    response = httpx.get(upstream_url, headers=plex._headers(), timeout=30, follow_redirects=True)
+    response = httpx.get(
+        upstream_url,
+        headers=_plex_media_headers(plex),
+        timeout=30,
+        follow_redirects=True,
+    )
     if response.status_code >= 400:
         raise HTTPException(502, f"Plex transcoder returned HTTP {response.status_code}")
     _assert_plex_url(plex, str(response.url))
@@ -235,8 +245,7 @@ def transcode_resource(
         raise HTTPException(400, "Invalid transcode resource") from exc
     _assert_plex_url(plex, upstream_url)
 
-    headers = plex._headers()
-    headers.pop("Accept", None)
+    headers = _plex_media_headers(plex)
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
 
