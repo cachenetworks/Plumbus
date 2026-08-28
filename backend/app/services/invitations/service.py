@@ -8,6 +8,12 @@ from app.models.models import Invitation, InvitationRedemption, Role, User
 from app.security.security import assert_can_assign_role, random_token, token_hash
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class InvitationService:
     def __init__(self, db: Session):
         self.db = db
@@ -47,7 +53,8 @@ class InvitationService:
             raise HTTPException(404, "Invitation not found")
         if invite.revoked_at is not None:
             raise HTTPException(410, "Invitation revoked")
-        if invite.expires_at is not None and invite.expires_at <= now:
+        expires_at = _aware(invite.expires_at)
+        if expires_at is not None and expires_at <= now:
             raise HTTPException(410, "Invitation expired")
         if invite.max_uses is not None and invite.use_count >= invite.max_uses:
             raise HTTPException(410, "Invitation has no remaining uses")
