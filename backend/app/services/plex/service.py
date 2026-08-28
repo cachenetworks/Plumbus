@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 import httpx
 from plexapi.server import PlexServer as PlexApiServer
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.models import PlexServer
+from app.security.secrets import decrypt_secret
 
 
 @dataclass(slots=True)
@@ -21,8 +25,15 @@ class PlexConnectionInfo:
 
 class PlexService:
     def __init__(self, base_url: str | None = None, token: str | None = None):
-        self.base_url = (base_url or settings.PLEX_URL).rstrip("/")
-        self.token = token or settings.PLEX_TOKEN
+        self.base_url = (base_url if base_url is not None else settings.PLEX_URL).rstrip("/")
+        self.token = token if token is not None else settings.PLEX_TOKEN
+
+    @classmethod
+    def from_db(cls, db: Session) -> "PlexService":
+        row = db.scalar(select(PlexServer).where(PlexServer.enabled.is_(True)).order_by(PlexServer.id).limit(1))
+        if not row or row.base_url == "environment" or row.token_ciphertext == "environment":
+            return cls()
+        return cls(row.base_url, decrypt_secret(row.token_ciphertext))
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -123,9 +134,7 @@ class PlexService:
             media_rows: list[dict[str, Any]] = []
             for media in getattr(item, "media", []) or []:
                 for part in getattr(media, "parts", []) or []:
-                    hdr = None
-                    if getattr(media, "videoDynamicRange", None):
-                        hdr = str(media.videoDynamicRange)
+                    hdr = str(media.videoDynamicRange) if getattr(media, "videoDynamicRange", None) else None
                     media_rows.append(
                         {
                             "plex_media_id": str(getattr(media, "id", "")) or None,
@@ -179,14 +188,32 @@ class PlexService:
             timeout=30,
         )
 
-    def stream_url(self, part_key: str) -> str:
+    def get_direct_play_url(self, part_key: str) -> str:
         return urljoin(f"{self.base_url}/", part_key.lstrip("/"))
 
-    def request_stream(self, url: str, range_header: str | None = None) -> httpx.Response:
-        headers = self._headers()
-        headers.pop("Accept", None)
-        if range_header:
-            headers["Range"] = range_header
-        client = httpx.Client(timeout=None, follow_redirects=True)
-        request = client.build_request("GET", url, headers=headers)
-        return client.send(request, stream=True)
+    def get_transcode_url(
+        self,
+        rating_key: str,
+        max_video_bitrate: int = 12000,
+        video_resolution: str = "1920x1080",
+    ) -> str:
+        params = {
+            "path": f"/library/metadata/{rating_key}",
+            "mediaIndex": 0,
+            "partIndex": 0,
+            "protocol": "http",
+            "offset": 0,
+            "fastSeek": 1,
+            "directPlay": 0,
+            "directStream": 1,
+            "videoQuality": 100,
+            "videoResolution": video_resolution,
+            "maxVideoBitrate": max_video_bitrate,
+            "audioBoost": 100,
+            "X-Plex-Client-Identifier": "plumbus-server",
+            "X-Plex-Token": self.token,
+        }
+        return f"{self.base_url}/video/:/transcode/universal/start.m3u8?{urlencode(params)}"
+
+    def stream_url(self, part_key: str) -> str:
+        return self.get_direct_play_url(part_key)
