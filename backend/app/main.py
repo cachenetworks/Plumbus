@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api import audit, auth, health, history, invites, movies, playback, plex, settings as settings_api, users
+from app.api import audit, auth, health, history, invites, movies, playback, plex, settings as settings_api, users, webhooks
 from app.core.config import settings
 from app.security.middleware import SecurityGateMiddleware
 
@@ -47,5 +47,6 @@ for router in (
     history.router,
     audit.router,
     settings_api.router,
+    webhooks.router,
 ):
     app.include_router(router)
