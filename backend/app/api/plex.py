@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.models import AuditLog, PlexLibrary, PlexScanJob, PlexServer, Role, User
+from app.models.models import AuditLog, Movie, PlexLibrary, PlexScanJob, PlexServer, Role, User
 from app.security.secrets import encrypt_secret
 from app.security.security import require_role
 from app.services.plex.service import PlexService
@@ -21,6 +21,19 @@ class LibraryUpdate(BaseModel):
 class PlexSettingsUpdate(BaseModel):
     base_url: str = Field(min_length=8, max_length=512)
     token: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
+def _queue_library_scan(db: Session, library: PlexLibrary, actor: User | None, mode: str, target_movie_id: int | None = None) -> PlexScanJob:
+    job = PlexScanJob(
+        library_id=library.id,
+        mode=mode,
+        status="queued",
+        requested_by_id=actor.id if actor else None,
+    )
+    db.add(job)
+    db.flush()
+    scan_library.delay(job.id, target_movie_id)
+    return job
 
 
 @router.get("/connection")
@@ -87,8 +100,6 @@ def update_plex_settings(
     row.server_version = info.version
     row.enabled = True
 
-    # A different Plex server may reuse library numeric keys, so disable old mappings until
-    # the administrator explicitly discovers and re-enables libraries from the new server.
     if old_identifier and info.machine_identifier and old_identifier != info.machine_identifier:
         for library in db.scalars(select(PlexLibrary).where(PlexLibrary.server_id == 1)).all():
             library.enabled = False
@@ -193,12 +204,52 @@ def queue_scan(
         raise HTTPException(404, "Library not found")
     if not library.enabled:
         raise HTTPException(409, "Enable the library before scanning it")
-    job = PlexScanJob(library_id=library.id, mode="single_library", status="queued", requested_by_id=actor.id)
-    db.add(job)
+    job = _queue_library_scan(db, library, actor, "single_library")
     db.commit()
-    db.refresh(job)
-    scan_library.delay(job.id)
     return {"job_id": job.id, "status": job.status}
+
+
+@router.post("/scans/full")
+def queue_full_scan(
+    actor: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    libraries = db.scalars(select(PlexLibrary).where(PlexLibrary.enabled.is_(True))).all()
+    if not libraries:
+        raise HTTPException(409, "No Plex libraries are enabled")
+    jobs = [_queue_library_scan(db, library, actor, "full") for library in libraries]
+    db.commit()
+    return {"job_ids": [job.id for job in jobs], "queued": len(jobs)}
+
+
+@router.post("/scans/incremental")
+def queue_incremental_scan(
+    actor: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    libraries = db.scalars(select(PlexLibrary).where(PlexLibrary.enabled.is_(True))).all()
+    if not libraries:
+        raise HTTPException(409, "No Plex libraries are enabled")
+    jobs = [_queue_library_scan(db, library, actor, "incremental") for library in libraries]
+    db.commit()
+    return {"job_ids": [job.id for job in jobs], "queued": len(jobs)}
+
+
+@router.post("/movies/{movie_id}/refresh")
+def queue_movie_refresh(
+    movie_id: int,
+    actor: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    movie = db.get(Movie, movie_id)
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    library = db.get(PlexLibrary, movie.library_id)
+    if not library or not library.enabled:
+        raise HTTPException(409, "The movie's Plex library is not enabled")
+    job = _queue_library_scan(db, library, actor, "single_movie", movie.id)
+    db.commit()
+    return {"job_id": job.id, "status": job.status, "movie_id": movie.id}
 
 
 @router.get("/scans")
