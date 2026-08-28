@@ -1,0 +1,27 @@
+services:
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  backend:
+    restart: unless-stopped
+    command: gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 --access-logfile - --error-logfile -
+    volumes: []
+
+  worker:
+    restart: unless-stopped
+    volumes: []
+
+  beat:
+    restart: unless-stopped
+    volumes: []
+
+  frontend:
+    restart: unless-stopped
+    command: npm run preview -- --host 0.0.0.0 --port 5173
+    volumes: []
+
+  nginx:
+    restart: unless-stopped
