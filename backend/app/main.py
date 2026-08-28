@@ -2,13 +2,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api import audit, auth, health, history, invites, movies, playback, plex, users
+from app.api import audit, auth, health, history, invites, movies, playback, plex, settings as settings_api, users
 from app.core.config import settings
 from app.security.middleware import SecurityGateMiddleware
 
 app = FastAPI(
     title="Plumbus API",
-    version="0.1.0",
+    version="1.0.0",
     docs_url="/api/docs" if settings.APP_ENV != "production" else None,
     redoc_url=None,
 )
@@ -19,7 +19,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Range", "X-CSRF-Token"],
     expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
 )
@@ -46,5 +46,6 @@ for router in (
     users.router,
     history.router,
     audit.router,
+    settings_api.router,
 ):
     app.include_router(router)
