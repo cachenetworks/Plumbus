@@ -7,7 +7,7 @@ services:
 
   backend:
     restart: unless-stopped
-    command: gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 --access-logfile - --error-logfile -
+    command: sh -c "alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 --access-logfile - --error-logfile -"
     volumes: []
 
   worker:
@@ -19,8 +19,11 @@ services:
     volumes: []
 
   frontend:
+    build:
+      context: ./frontend
+      target: production
     restart: unless-stopped
-    command: npm run preview -- --host 0.0.0.0 --port 5173
+    command: serve -s dist -l 5173
     volumes: []
 
   nginx:
