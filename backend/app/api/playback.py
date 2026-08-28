@@ -58,7 +58,7 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
     if not media or not media.part_key:
         raise HTTPException(410, "Indexed media is no longer available")
 
-    plex = PlexService()
+    plex = PlexService.from_db(db)
     if not plex.base_url or not plex.token:
         raise HTTPException(503, "Plex is not configured")
     upstream_url = plex.stream_url(media.part_key)
