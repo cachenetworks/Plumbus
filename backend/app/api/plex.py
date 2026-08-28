@@ -23,7 +23,7 @@ class PlexSettingsUpdate(BaseModel):
     token: str | None = Field(default=None, min_length=1, max_length=1024)
 
 
-def _queue_library_scan(db: Session, library: PlexLibrary, actor: User | None, mode: str, target_movie_id: int | None = None) -> PlexScanJob:
+def _new_scan_job(db: Session, library: PlexLibrary, actor: User | None, mode: str) -> PlexScanJob:
     job = PlexScanJob(
         library_id=library.id,
         mode=mode,
@@ -32,7 +32,6 @@ def _queue_library_scan(db: Session, library: PlexLibrary, actor: User | None, m
     )
     db.add(job)
     db.flush()
-    scan_library.delay(job.id, target_movie_id)
     return job
 
 
@@ -204,8 +203,9 @@ def queue_scan(
         raise HTTPException(404, "Library not found")
     if not library.enabled:
         raise HTTPException(409, "Enable the library before scanning it")
-    job = _queue_library_scan(db, library, actor, "single_library")
+    job = _new_scan_job(db, library, actor, "single_library")
     db.commit()
+    scan_library.delay(job.id)
     return {"job_id": job.id, "status": job.status}
 
 
@@ -217,8 +217,10 @@ def queue_full_scan(
     libraries = db.scalars(select(PlexLibrary).where(PlexLibrary.enabled.is_(True))).all()
     if not libraries:
         raise HTTPException(409, "No Plex libraries are enabled")
-    jobs = [_queue_library_scan(db, library, actor, "full") for library in libraries]
+    jobs = [_new_scan_job(db, library, actor, "full") for library in libraries]
     db.commit()
+    for job in jobs:
+        scan_library.delay(job.id)
     return {"job_ids": [job.id for job in jobs], "queued": len(jobs)}
 
 
@@ -230,8 +232,10 @@ def queue_incremental_scan(
     libraries = db.scalars(select(PlexLibrary).where(PlexLibrary.enabled.is_(True))).all()
     if not libraries:
         raise HTTPException(409, "No Plex libraries are enabled")
-    jobs = [_queue_library_scan(db, library, actor, "incremental") for library in libraries]
+    jobs = [_new_scan_job(db, library, actor, "incremental") for library in libraries]
     db.commit()
+    for job in jobs:
+        scan_library.delay(job.id)
     return {"job_ids": [job.id for job in jobs], "queued": len(jobs)}
 
 
@@ -247,8 +251,9 @@ def queue_movie_refresh(
     library = db.get(PlexLibrary, movie.library_id)
     if not library or not library.enabled:
         raise HTTPException(409, "The movie's Plex library is not enabled")
-    job = _queue_library_scan(db, library, actor, "single_movie", movie.id)
+    job = _new_scan_job(db, library, actor, "single_movie")
     db.commit()
+    scan_library.delay(job.id, movie.id)
     return {"job_id": job.id, "status": job.status, "movie_id": movie.id}
 
 
