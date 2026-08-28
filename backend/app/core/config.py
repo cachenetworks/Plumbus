@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     PLEX_URL: str = ""
     PLEX_TOKEN: str = ""
     PLEX_SCAN_INTERVAL_MINUTES: int = 30
+    PLEX_WEBHOOK_SECRET: str = ""
     MOCK_PLEX: bool = False
 
     SESSION_SECRET: str = "development-only-change-me"
