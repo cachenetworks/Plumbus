@@ -40,7 +40,7 @@ class PlexService:
             "X-Plex-Token": self.token,
             "X-Plex-Client-Identifier": "plumbus-server",
             "X-Plex-Product": "Plumbus",
-            "X-Plex-Version": "0.1.0",
+            "X-Plex-Version": "1.0.0",
             "Accept": "application/json",
         }
 
@@ -201,7 +201,7 @@ class PlexService:
             "path": f"/library/metadata/{rating_key}",
             "mediaIndex": 0,
             "partIndex": 0,
-            "protocol": "http",
+            "protocol": "hls",
             "offset": 0,
             "fastSeek": 1,
             "directPlay": 0,
@@ -211,6 +211,8 @@ class PlexService:
             "maxVideoBitrate": max_video_bitrate,
             "audioBoost": 100,
             "X-Plex-Client-Identifier": "plumbus-server",
+            "X-Plex-Product": "Plumbus",
+            "X-Plex-Version": "1.0.0",
             "X-Plex-Token": self.token,
         }
         return f"{self.base_url}/video/:/transcode/universal/start.m3u8?{urlencode(params)}"
