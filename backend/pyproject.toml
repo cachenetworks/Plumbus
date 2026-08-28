@@ -1,0 +1,39 @@
+[project]
+name = "plumbus-backend"
+version = "0.1.0"
+description = "Private Plex-powered VRChat cinema backend"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "gunicorn>=23,<24",
+  "sqlalchemy>=2.0.36,<3",
+  "alembic>=1.14,<2",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic-settings>=2.7,<3",
+  "httpx>=0.28,<1",
+  "redis>=5.2,<6",
+  "celery>=5.4,<6",
+  "plexapi>=4.16,<5",
+  "python-multipart>=0.0.20,<1",
+  "itsdangerous>=2.2,<3",
+  "passlib[argon2]>=1.7.4,<2",
+  "cryptography>=44,<45",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.9,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["app/tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
