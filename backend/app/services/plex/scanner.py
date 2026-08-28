@@ -10,7 +10,7 @@ from app.services.plex.service import PlexService
 class PlexScanner:
     def __init__(self, db: Session, plex: PlexService | None = None):
         self.db = db
-        self.plex = plex or PlexService()
+        self.plex = plex or PlexService.from_db(db)
 
     def scan_library(self, library: PlexLibrary, job: PlexScanJob) -> PlexScanJob:
         job.status = "running"
