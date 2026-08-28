@@ -11,12 +11,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
-RUN python -m pip install --upgrade pip \
-    && pip install .
-
 COPY . .
-RUN chmod +x /app/docker-entrypoint.sh \
+RUN python -m pip install --upgrade pip \
+    && pip install . \
+    && chmod +x /app/docker-entrypoint.sh \
     && addgroup --system app \
     && adduser --system --ingroup app app \
     && chown -R app:app /app
