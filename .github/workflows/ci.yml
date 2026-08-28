@@ -67,12 +67,16 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
 
   compose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: cp .env.example .env
+      - run: docker compose config >/dev/null
       - run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+      - run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
       - run: docker build --target production -t plumbus-frontend ./frontend
       - run: docker build -t plumbus-backend ./backend
