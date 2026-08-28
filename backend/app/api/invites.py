@@ -47,12 +47,7 @@ def public_invite_status(token: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/api/admin/invites")
-def create_invite(
-    payload: InviteCreate,
-    request: Request,
-    actor: User = Depends(require_role(Role.ADMIN)),
-    db: Session = Depends(get_db),
-) -> dict:
+def create_invite(payload: InviteCreate, request: Request, actor: User = Depends(require_role(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
     invite, raw = InvitationService(db).create_invite(
         actor=actor,
         assigned_role=payload.assigned_role,
@@ -61,77 +56,28 @@ def create_invite(
         label=payload.label,
         note=payload.note,
     )
-    db.add(
-        AuditLog(
-            actor_user_id=actor.id,
-            event="invite.created",
-            target_type="invite",
-            target_id=str(invite.id),
-            ip=request.client.host if request.client else None,
-            metadata={"assigned_role": invite.assigned_role.value, "max_uses": invite.max_uses},
-        )
-    )
+    db.add(AuditLog(actor_user_id=actor.id, event="invite.created", target_type="invite", target_id=str(invite.id), ip=request.client.host if request.client else None, event_metadata={"assigned_role": invite.assigned_role.value, "max_uses": invite.max_uses}))
     db.commit()
-    return {
-        "id": invite.id,
-        "token": raw,
-        "invite_url": f"{settings.APP_URL}/invite/{raw}",
-        "expires_at": invite.expires_at,
-        "max_uses": invite.max_uses,
-        "assigned_role": invite.assigned_role.value,
-    }
+    return {"id": invite.id, "token": raw, "invite_url": f"{settings.APP_URL}/invite/{raw}", "expires_at": invite.expires_at, "max_uses": invite.max_uses, "assigned_role": invite.assigned_role.value}
 
 
 @router.get("/api/admin/invites")
-def list_invites(
-    actor: User = Depends(require_role(Role.ADMIN)),
-    db: Session = Depends(get_db),
-) -> list[dict]:
+def list_invites(actor: User = Depends(require_role(Role.ADMIN)), db: Session = Depends(get_db)) -> list[dict]:
     del actor
     invites = db.scalars(select(Invitation).order_by(Invitation.created_at.desc()).limit(250)).all()
     result: list[dict] = []
     for invite in invites:
-        redemption_rows = db.scalars(
-            select(InvitationRedemption).where(InvitationRedemption.invitation_id == invite.id)
-        ).all()
-        result.append(
-            {
-                "id": invite.id,
-                "label": invite.label,
-                "created_by_id": invite.created_by_id,
-                "created_at": invite.created_at,
-                "expires_at": invite.expires_at,
-                "assigned_role": invite.assigned_role.value,
-                "max_uses": invite.max_uses,
-                "use_count": invite.use_count,
-                "uses_remaining": None if invite.max_uses is None else max(invite.max_uses - invite.use_count, 0),
-                "redeemed_by_user_ids": [r.user_id for r in redemption_rows],
-                "revoked": invite.revoked_at is not None,
-                "status": _status(invite),
-            }
-        )
+        redemption_rows = db.scalars(select(InvitationRedemption).where(InvitationRedemption.invitation_id == invite.id)).all()
+        result.append({"id": invite.id, "label": invite.label, "created_by_id": invite.created_by_id, "created_at": invite.created_at, "expires_at": invite.expires_at, "assigned_role": invite.assigned_role.value, "max_uses": invite.max_uses, "use_count": invite.use_count, "uses_remaining": None if invite.max_uses is None else max(invite.max_uses - invite.use_count, 0), "redeemed_by_user_ids": [r.user_id for r in redemption_rows], "revoked": invite.revoked_at is not None, "status": _status(invite)})
     return result
 
 
 @router.post("/api/admin/invites/{invite_id}/revoke")
-def revoke_invite(
-    invite_id: int,
-    request: Request,
-    actor: User = Depends(require_role(Role.ADMIN)),
-    db: Session = Depends(get_db),
-) -> dict:
+def revoke_invite(invite_id: int, request: Request, actor: User = Depends(require_role(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
     invite = db.get(Invitation, invite_id)
     if not invite:
         raise HTTPException(404, "Invitation not found")
     InvitationService(db).revoke(invite, actor)
-    db.add(
-        AuditLog(
-            actor_user_id=actor.id,
-            event="invite.revoked",
-            target_type="invite",
-            target_id=str(invite.id),
-            ip=request.client.host if request.client else None,
-        )
-    )
+    db.add(AuditLog(actor_user_id=actor.id, event="invite.revoked", target_type="invite", target_id=str(invite.id), ip=request.client.host if request.client else None))
     db.commit()
     return {"id": invite.id, "status": "Revoked"}
