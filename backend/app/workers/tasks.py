@@ -7,7 +7,7 @@ from app.workers.celery_app import celery_app
 
 
 @celery_app.task(name="app.workers.tasks.scan_library")
-def scan_library(job_id: int) -> dict:
+def scan_library(job_id: int, target_movie_id: int | None = None) -> dict:
     with SessionLocal() as db:
         job = db.get(PlexScanJob, job_id)
         if not job or job.library_id is None:
@@ -15,12 +15,15 @@ def scan_library(job_id: int) -> dict:
         library = db.get(PlexLibrary, job.library_id)
         if not library:
             return {"ok": False, "error": "library_not_found"}
-        result = PlexScanner(db).scan_library(library, job)
+        result = PlexScanner(db).scan_library(library, job, target_movie_id=target_movie_id)
         return {
             "ok": result.status == "completed",
             "job_id": result.id,
             "status": result.status,
             "items_scanned": result.items_scanned,
+            "items_added": result.items_added,
+            "items_updated": result.items_updated,
+            "items_removed": result.items_removed,
         }
 
 
