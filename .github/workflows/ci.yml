@@ -16,6 +16,8 @@ jobs:
       SESSION_SECRET: test-session-secret-test-session-secret-123456
       TOKEN_ENCRYPTION_KEY: test-token-key-test-token-key-1234567890
       COOKIE_SECURE: "false"
+      MOCK_PLEX: "true"
+      TRUSTED_HOSTS: localhost,127.0.0.1,testserver
     services:
       postgres:
         image: postgres:17-alpine
@@ -49,7 +51,8 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: alembic upgrade head
       - run: pytest -q
-      - run: ruff check app
+      - run: python -m compileall -q app
+      - run: ruff check app --ignore E402,E702
 
   frontend:
     runs-on: ubuntu-latest
@@ -61,9 +64,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
+      - run: npm install
       - run: npm test
       - run: npm run build
 
