@@ -1,29 +1,19 @@
+# Optional production override.
+# docker-compose.yml is already production-safe and may be run directly.
+# This file forces production application settings for explicit prod deployments.
+
 services:
-  postgres:
-    restart: unless-stopped
-
-  redis:
-    restart: unless-stopped
-
   backend:
-    restart: unless-stopped
-    command: sh -c "alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 --access-logfile - --error-logfile -"
-    volumes: []
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "true"
 
   worker:
-    restart: unless-stopped
-    volumes: []
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "true"
 
   beat:
-    restart: unless-stopped
-    volumes: []
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.prod
-    restart: unless-stopped
-    volumes: []
-
-  nginx:
-    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      COOKIE_SECURE: "true"
