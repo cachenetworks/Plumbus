@@ -4,6 +4,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import audit, auth, health, history, invites, movies, playback, plex, users
 from app.core.config import settings
+from app.security.middleware import SecurityGateMiddleware
 
 app = FastAPI(
     title="Plumbus API",
@@ -13,6 +14,7 @@ app = FastAPI(
 )
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
+app.add_middleware(SecurityGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
