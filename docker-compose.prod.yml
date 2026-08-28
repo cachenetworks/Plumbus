@@ -21,9 +21,8 @@ services:
   frontend:
     build:
       context: ./frontend
-      target: production
+      dockerfile: Dockerfile.prod
     restart: unless-stopped
-    command: serve -s dist -l 5173
     volumes: []
 
   nginx:
