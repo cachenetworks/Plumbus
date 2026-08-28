@@ -56,6 +56,17 @@ def test_expired_and_revoked_invites_are_rejected(db):
     assert revoked.value.status_code == 410
 
 
+def test_consumed_single_use_invite_cannot_be_reused(db):
+    actor = make_user(db, discord_id="200", role=Role.SUPERADMIN)
+    invite, raw = InvitationService(db).create_invite(actor, max_uses=1)
+    member = make_user(db, discord_id="201")
+    InvitationService(db).redeem(invite, member, "127.0.0.1")
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        InvitationService(db).find_valid(raw)
+    assert exc.value.status_code == 410
+
+
 def test_playback_token_expires(db):
     user = make_user(db)
     server = PlexServer(id=1, base_url="mock", token_ciphertext="mock")
@@ -96,8 +107,18 @@ def test_suspended_user_session_is_rejected(client, db):
 
 
 def test_normal_login_never_creates_unknown_user(client, db):
-    # The callback is covered separately with mocked Discord responses; this guards the public
-    # contract that there is no generic account-creation endpoint.
     response = client.get("/api/auth/me")
     assert response.status_code == 401
     assert db.query(User).count() == 0
+
+
+def test_invalid_oauth_state_is_rejected_before_discord_exchange(client, db):
+    response = client.get("/api/auth/discord/callback?code=not-used&state=invalid-state")
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid or expired OAuth state"
+    assert db.query(User).count() == 0
+
+
+def test_admin_api_rejects_anonymous_requests(client):
+    response = client.get("/api/admin/users")
+    assert response.status_code == 401
