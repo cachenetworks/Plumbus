@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi import HTTPException
 
-from app.models.models import Invitation, Movie, MovieMedia, PlexLibrary, PlexScanJob, PlexServer, Role, Session as UserSession, User, UserStatus
+from app.models.models import Movie, MovieMedia, PlexLibrary, PlexScanJob, PlexServer, Role, Session as UserSession, User, UserStatus
 from app.security.security import random_token, token_hash
 from app.services.invitations.service import InvitationService
 from app.services.playback.service import PlaybackService
