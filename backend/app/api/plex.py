@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.models import PlexLibrary, PlexScanJob, Role, User
+from app.models.models import AuditLog, PlexLibrary, PlexScanJob, PlexServer, Role, User
+from app.security.secrets import encrypt_secret
 from app.security.security import require_role
 from app.services.plex.service import PlexService
 from app.workers.tasks import scan_library
@@ -17,10 +18,18 @@ class LibraryUpdate(BaseModel):
     visible_to_members: bool | None = None
 
 
+class PlexSettingsUpdate(BaseModel):
+    base_url: str = Field(min_length=8, max_length=512)
+    token: str | None = Field(default=None, min_length=1, max_length=1024)
+
+
 @router.get("/connection")
-def connection(actor: User = Depends(require_role(Role.ADMIN))) -> dict:
+def connection(
+    actor: User = Depends(require_role(Role.SUPPORT)),
+    db: Session = Depends(get_db),
+) -> dict:
     del actor
-    info = PlexService().connect()
+    info = PlexService.from_db(db).connect()
     return {
         "connected": info.connected,
         "server_name": info.name,
@@ -30,13 +39,92 @@ def connection(actor: User = Depends(require_role(Role.ADMIN))) -> dict:
     }
 
 
+@router.get("/settings")
+def plex_settings(
+    actor: User = Depends(require_role(Role.SUPERADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    del actor
+    row = db.get(PlexServer, 1)
+    service = PlexService.from_db(db)
+    return {
+        "base_url": service.base_url,
+        "token_configured": bool(service.token),
+        "source": "environment" if not row or row.base_url == "environment" else "database",
+        "server_name": None if not row else row.server_name,
+        "server_identifier": None if not row else row.server_identifier,
+        "server_version": None if not row else row.server_version,
+    }
+
+
+@router.put("/settings")
+def update_plex_settings(
+    payload: PlexSettingsUpdate,
+    request: Request,
+    actor: User = Depends(require_role(Role.SUPERADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    current = PlexService.from_db(db)
+    candidate_token = payload.token or current.token
+    if not candidate_token:
+        raise HTTPException(400, "A Plex token is required")
+
+    candidate = PlexService(payload.base_url.rstrip("/"), candidate_token)
+    info = candidate.connect()
+    if not info.connected:
+        raise HTTPException(400, "Unable to connect to Plex with the supplied settings")
+
+    row = db.get(PlexServer, 1)
+    old_identifier = row.server_identifier if row else None
+    if row is None:
+        row = PlexServer(id=1, base_url=payload.base_url.rstrip("/"), token_ciphertext=encrypt_secret(candidate_token))
+        db.add(row)
+    else:
+        row.base_url = payload.base_url.rstrip("/")
+        row.token_ciphertext = encrypt_secret(candidate_token)
+    row.server_name = info.name
+    row.server_identifier = info.machine_identifier
+    row.server_version = info.version
+    row.enabled = True
+
+    # A different Plex server may reuse library numeric keys, so disable old mappings until
+    # the administrator explicitly discovers and re-enables libraries from the new server.
+    if old_identifier and info.machine_identifier and old_identifier != info.machine_identifier:
+        for library in db.scalars(select(PlexLibrary).where(PlexLibrary.server_id == 1)).all():
+            library.enabled = False
+
+    db.add(
+        AuditLog(
+            actor_user_id=actor.id,
+            event="plex.settings_changed",
+            target_type="plex_server",
+            target_id="1",
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            event_metadata={
+                "base_url": row.base_url,
+                "server_identifier": info.machine_identifier,
+                "token_rotated": payload.token is not None,
+            },
+        )
+    )
+    db.commit()
+    return {
+        "connected": True,
+        "server_name": info.name,
+        "version": info.version,
+        "server_identifier": info.machine_identifier,
+        "token_configured": True,
+    }
+
+
 @router.post("/libraries/discover")
 def discover_libraries(
     actor: User = Depends(require_role(Role.ADMIN)),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     del actor
-    plex = PlexService()
+    plex = PlexService.from_db(db)
     info = plex.connect()
     if not info.connected:
         raise HTTPException(503, "Unable to connect to Plex")
@@ -44,7 +132,6 @@ def discover_libraries(
     for remote in info.libraries or []:
         library = db.scalar(select(PlexLibrary).where(PlexLibrary.server_id == 1, PlexLibrary.plex_key == remote["key"]))
         if library is None:
-            # Environment-backed Plex is represented by server_id=1 in the first migration/bootstrap.
             library = PlexLibrary(
                 server_id=1,
                 plex_key=remote["key"],
@@ -104,6 +191,8 @@ def queue_scan(
     library = db.get(PlexLibrary, library_id)
     if not library:
         raise HTTPException(404, "Library not found")
+    if not library.enabled:
+        raise HTTPException(409, "Enable the library before scanning it")
     job = PlexScanJob(library_id=library.id, mode="single_library", status="queued", requested_by_id=actor.id)
     db.add(job)
     db.commit()
