@@ -26,14 +26,18 @@ class Settings(BaseSettings):
     SESSION_SECRET: str = "development-only-change-me"
     TOKEN_ENCRYPTION_KEY: str = "development-only-change-me-too"
     PLAYBACK_TOKEN_LIFETIME_MINUTES: int = 360
+    PREFERRED_VIDEO_CODEC: str = "h264"
+    PREFERRED_RESOLUTION: str = "1080p"
+    MAX_STREAM_BITRATE_KBPS: int = 20000
+    ALLOW_PLEX_TRANSCODING: bool = False
 
     COOKIE_SECURE: bool = False
     TRUSTED_HOSTS: str = "localhost,127.0.0.1"
     CORS_ORIGINS: str = "http://localhost:8080,http://localhost:5173"
 
-    @field_validator("PLEX_SCAN_INTERVAL_MINUTES", "PLAYBACK_TOKEN_LIFETIME_MINUTES")
+    @field_validator("PLEX_SCAN_INTERVAL_MINUTES", "PLAYBACK_TOKEN_LIFETIME_MINUTES", "MAX_STREAM_BITRATE_KBPS")
     @classmethod
-    def positive_minutes(cls, value: int) -> int:
+    def positive_numbers(cls, value: int) -> int:
         if value < 1:
             raise ValueError("must be positive")
         return value
