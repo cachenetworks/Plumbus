@@ -30,6 +30,8 @@ class PlexService:
 
     @classmethod
     def from_db(cls, db: Session) -> "PlexService":
+        if settings.MOCK_PLEX:
+            return cls("mock", "mock")
         row = db.scalar(select(PlexServer).where(PlexServer.enabled.is_(True)).order_by(PlexServer.id).limit(1))
         if not row or row.base_url == "environment" or row.token_ciphertext == "environment":
             return cls()
