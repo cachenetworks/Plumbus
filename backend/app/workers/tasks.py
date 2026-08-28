@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.db.database import SessionLocal
-from app.models.models import PlexLibrary, PlexScanJob
+from app.models.models import AuditLog, PlexLibrary, PlexScanJob
 from app.services.plex.scanner import PlexScanner
 from app.workers.celery_app import celery_app
 
@@ -15,7 +15,42 @@ def scan_library(job_id: int, target_movie_id: int | None = None) -> dict:
         library = db.get(PlexLibrary, job.library_id)
         if not library:
             return {"ok": False, "error": "library_not_found"}
+
+        db.add(
+            AuditLog(
+                actor_user_id=job.requested_by_id,
+                event="plex.scan.started",
+                target_type="plex_scan_job",
+                target_id=str(job.id),
+                event_metadata={
+                    "mode": job.mode,
+                    "library_id": library.id,
+                    "target_movie_id": target_movie_id,
+                },
+            )
+        )
+        db.commit()
+
         result = PlexScanner(db).scan_library(library, job, target_movie_id=target_movie_id)
+        event = "plex.scan.completed" if result.status == "completed" else "plex.scan.failed"
+        db.add(
+            AuditLog(
+                actor_user_id=result.requested_by_id,
+                event=event,
+                target_type="plex_scan_job",
+                target_id=str(result.id),
+                event_metadata={
+                    "mode": result.mode,
+                    "library_id": result.library_id,
+                    "items_scanned": result.items_scanned,
+                    "items_added": result.items_added,
+                    "items_updated": result.items_updated,
+                    "items_removed": result.items_removed,
+                    "error": result.last_error if result.status == "failed" else None,
+                },
+            )
+        )
+        db.commit()
         return {
             "ok": result.status == "completed",
             "job_id": result.id,
