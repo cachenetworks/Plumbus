@@ -13,6 +13,8 @@ type VrChatResponse={
   media?:{resolution?:string;video_codec?:string;container?:string}
 }
 
+type MediaState={playable?:boolean;media_type?:string}
+
 async function postVrChat(id:number):Promise<VrChatResponse>{
   const response=await fetch(`/api/playback/media/${id}/vrchat`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'}})
   if(!response.ok){
@@ -26,13 +28,21 @@ async function postVrChat(id:number):Promise<VrChatResponse>{
 export function PlaybackToolbar(){
   const location=useLocation()
   const mediaId=useMemo(()=>Number(location.pathname.match(/^\/media\/(\d+)$/)?.[1]||0),[location.pathname])
+  const [playable,setPlayable]=useState(false)
   const [result,setResult]=useState<VrChatResponse|null>(null)
   const [error,setError]=useState('')
   const [loading,setLoading]=useState(false)
   const [copied,setCopied]=useState(false)
 
-  useEffect(()=>{setResult(null);setError('');setCopied(false)},[mediaId])
-  if(!mediaId)return null
+  useEffect(()=>{
+    setResult(null);setError('');setCopied(false);setPlayable(false)
+    if(!mediaId)return
+    fetch(`/api/movies/${mediaId}`,{credentials:'include'})
+      .then(async response=>response.ok?response.json():Promise.reject())
+      .then((media:MediaState)=>setPlayable(Boolean(media.playable&&(media.media_type==='movie'||media.media_type==='episode'))))
+      .catch(()=>setPlayable(false))
+  },[mediaId])
+  if(!mediaId||!playable)return null
 
   async function generate(){
     setLoading(true);setError('');setCopied(false)
