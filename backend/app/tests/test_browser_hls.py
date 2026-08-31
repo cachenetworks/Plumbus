@@ -82,7 +82,7 @@ def test_alternate_audio_direct_stream_copies_both_tracks_and_exact_version():
     assert "audioCodec=aac" in profile
 
 
-def test_direct_audio_selection_preserves_primary_language_and_avoids_commentary():
+def test_direct_audio_selection_preserves_language_avoids_commentary_and_prefers_aac():
     tracks = [
         {
             "id": "10",
@@ -116,6 +116,16 @@ def test_direct_audio_selection_preserves_primary_language_and_avoids_commentary
         },
         {
             "id": "13",
+            "codec": "mp3",
+            "language": "English",
+            "language_code": "eng",
+            "selected": False,
+            "default": False,
+            "channels": 2,
+            "title": None,
+        },
+        {
+            "id": "14",
             "codec": "aac",
             "language": "English",
             "language_code": "eng",
@@ -128,7 +138,7 @@ def test_direct_audio_selection_preserves_primary_language_and_avoids_commentary
 
     selected = choose_direct_browser_audio_track(tracks, video_codec="h264")
     assert selected is not None
-    assert selected["id"] == "13"
+    assert selected["id"] == "14"
     assert choose_direct_browser_audio_track(tracks, video_codec="hevc") is None
 
 
@@ -153,11 +163,13 @@ def test_browser_native_requires_browser_safe_audio():
     aac = MovieMedia(container="mp4", video_codec="h264", audio_codec="aac")
     ac3 = MovieMedia(container="mp4", video_codec="h264", audio_codec="ac3")
     eac3 = MovieMedia(container="mp4", video_codec="h264", audio_codec="eac3")
+    unknown = MovieMedia(container="mp4", video_codec="h264", audio_codec=None)
     hevc = MovieMedia(container="mp4", video_codec="hevc", audio_codec="aac")
 
     assert PlaybackService.browser_native_media(aac) is True
     assert PlaybackService.browser_native_media(ac3) is False
     assert PlaybackService.browser_native_media(eac3) is False
+    assert PlaybackService.browser_native_media(unknown) is False
     assert PlaybackService.browser_native_media(hevc) is False
 
 
