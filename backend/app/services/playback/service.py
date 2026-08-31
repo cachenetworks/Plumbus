@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import HTTPException
 from sqlalchemy import case, select
@@ -9,12 +10,14 @@ from app.models.models import Movie, MovieMedia, PlaybackToken, User
 from app.security.security import random_token, token_hash
 from app.services.settings import ApplicationSettingsService
 
+PlaybackTarget = Literal["browser", "vrchat"]
+
 
 class PlaybackService:
     def __init__(self, db: Session):
         self.db = db
 
-    def select_best_media(self, movie: Movie) -> MovieMedia:
+    def select_best_media(self, movie: Movie, target: PlaybackTarget = "browser") -> MovieMedia:
         prefs = ApplicationSettingsService(self.db).playback()
         preferred_codec = str(prefs["preferred_video_codec"]).lower()
         preferred_resolution = str(prefs["preferred_resolution"]).lower()
@@ -32,16 +35,32 @@ class PlaybackService:
             )
         ).all()
         if not candidates:
-            raise HTTPException(409, "No playable Plex media part is indexed for this movie")
+            raise HTTPException(409, "No playable Plex media part is indexed for this media item")
+
+        if target == "browser":
+            browser_native = [
+                media
+                for media in candidates
+                if (media.container or "").lower() in {"mp4", "m4v"}
+                and (media.video_codec or "").lower() in {"h264", "avc"}
+                and (media.audio_codec or "").lower() in {"aac", "mp3", "ac3", "eac3", ""}
+            ]
+            if browser_native:
+                return browser_native[0]
+
         return candidates[0]
 
     def get_media_info(self, media: MovieMedia) -> dict:
         prefs = ApplicationSettingsService(self.db).playback()
         codec = (media.video_codec or "").lower()
         container = (media.container or "").lower()
-        direct_play = codec in {"h264", "avc", "hevc", "h265"} and container in {"mp4", "mkv"}
+        direct_play = codec in {"h264", "avc", "hevc", "h265"} and container in {"mp4", "m4v", "mkv"}
+        browser_native = codec in {"h264", "avc"} and container in {"mp4", "m4v"}
         bitrate_ok = media.bitrate is None or media.bitrate <= int(prefs["max_stream_bitrate_kbps"])
-        preferred_codec = codec in {str(prefs["preferred_video_codec"]).lower(), "avc" if str(prefs["preferred_video_codec"]).lower() == "h264" else ""}
+        preferred_codec = codec in {
+            str(prefs["preferred_video_codec"]).lower(),
+            "avc" if str(prefs["preferred_video_codec"]).lower() == "h264" else "",
+        }
         if direct_play and bitrate_ok and preferred_codec:
             playback_mode = "Direct Play"
         elif direct_play and bitrate_ok:
@@ -59,6 +78,7 @@ class PlaybackService:
             "hdr": media.hdr,
             "playback_mode": playback_mode,
             "direct_play_candidate": direct_play,
+            "browser_native_candidate": browser_native and bitrate_ok,
             "allow_plex_transcoding": bool(prefs["allow_plex_transcoding"]),
         }
 
@@ -68,8 +88,9 @@ class PlaybackService:
         movie: Movie,
         ip: str | None = None,
         user_agent: str | None = None,
+        target: PlaybackTarget = "browser",
     ) -> tuple[PlaybackToken, str]:
-        media = self.select_best_media(movie)
+        media = self.select_best_media(movie, target=target)
         raw = random_token(32)
         token = PlaybackToken(
             token_hash=token_hash(raw),
