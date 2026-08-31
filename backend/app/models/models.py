@@ -113,11 +113,28 @@ class PlexLibrary(Base):
 
 
 class Movie(Base):
+    """Generic indexed Plex media row.
+
+    The historic table/class names are kept for migration and API compatibility. Rows can
+    now represent a movie, show, season, or episode. Playback/history continue to use the
+    same stable numeric IDs, so existing movie installs remain compatible.
+    """
+
     __tablename__ = "movies"
-    __table_args__ = (UniqueConstraint("library_id", "rating_key", name="uq_movie_library_rating_key"), Index("ix_movies_title_year", "title", "year"))
+    __table_args__ = (
+        UniqueConstraint("library_id", "rating_key", name="uq_movie_library_rating_key"),
+        Index("ix_movies_title_year", "title", "year"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     library_id: Mapped[int] = mapped_column(ForeignKey("plex_libraries.id", ondelete="CASCADE"), index=True)
     rating_key: Mapped[str] = mapped_column(String(64), index=True)
+    media_type: Mapped[str] = mapped_column(String(16), default="movie", server_default="movie", index=True)
+    parent_rating_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    grandparent_rating_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    parent_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    grandparent_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    season_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    episode_number: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), index=True)
     original_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     year: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
