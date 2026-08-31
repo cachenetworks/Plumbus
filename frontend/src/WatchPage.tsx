@@ -51,6 +51,7 @@ type PlaybackResponse = {
   media:{playback_mode?:string;resolution?:string;video_codec?:string;audio_codec?:string;container?:string}
 }
 
+type AudioTracksResponse={audio_tracks:AudioTrack[];selected_audio_stream_id?:string|null;can_direct_switch:boolean}
 type EpisodeSummary = { id:number; title:string; season_number?:number; episode_number?:number }
 type NavigationResponse = { previous:EpisodeSummary|null; next:EpisodeSummary|null; series_title?:string }
 
@@ -105,10 +106,13 @@ export function WatchPage(){
   const [muted,setMuted]=useState(false)
   const [controlsVisible,setControlsVisible]=useState(true)
   const [audioSwitching,setAudioSwitching]=useState(false)
+  const [audioLoading,setAudioLoading]=useState(false)
+  const [audioMenuOpen,setAudioMenuOpen]=useState(false)
+  const [canDirectSwitch,setCanDirectSwitch]=useState<boolean|undefined>(undefined)
 
   useEffect(()=>{
     if(!id){setError('Invalid media id');setLoading(false);return}
-    setLoading(true);setError('');setItem(null);setPlayback(null);resumedRef.current=false;compatibilityAttemptedRef.current=false;pendingSeekRef.current=null;lastSavedRef.current=0
+    setLoading(true);setError('');setItem(null);setPlayback(null);resumedRef.current=false;compatibilityAttemptedRef.current=false;pendingSeekRef.current=null;lastSavedRef.current=0;setAudioMenuOpen(false);setCanDirectSwitch(undefined)
     Promise.all([
       jsonApi<MediaItem>(`/api/movies/${id}`),
       jsonApi<NavigationResponse>(`/api/playback/media/${id}/navigation`),
@@ -221,6 +225,29 @@ export function WatchPage(){
     setError('The browser could not decode this Plex stream. Try another source/audio track or use the VRChat link mode.')
   }
 
+  async function loadAudioTracks(){
+    if(playback?.audio_tracks){
+      setAudioMenuOpen(value=>!value)
+      return
+    }
+    setAudioLoading(true)
+    try{
+      const response=await jsonApi<AudioTracksResponse>(`/api/playback/media/${id}/audio-tracks`)
+      setPlayback(currentPlayback=>currentPlayback?{
+        ...currentPlayback,
+        audio_tracks:response.audio_tracks,
+        selected_audio_stream_id:currentPlayback.selected_audio_stream_id||response.selected_audio_stream_id,
+      }:currentPlayback)
+      setCanDirectSwitch(response.can_direct_switch)
+      setAudioMenuOpen(true)
+      setError('')
+    }catch(e:any){
+      setError(`Unable to load Plex audio tracks: ${e.message}`)
+    }finally{
+      setAudioLoading(false)
+    }
+  }
+
   async function switchAudioTrack(streamId:string){
     if(!streamId||streamId===playback?.selected_audio_stream_id)return
     const track=playback?.audio_tracks?.find(candidate=>candidate.id===streamId)
@@ -228,7 +255,7 @@ export function WatchPage(){
     const videoCodec=(playback?.media.video_codec||'').toLowerCase()
     const audioCodec=(track.codec||'').toLowerCase()
     if(!['h264','avc'].includes(videoCodec)||!['aac','mp3'].includes(audioCodec)){
-      setError('That audio track cannot be switched by Direct Stream without encoding the video/audio. Choose an AAC/MP3 track on H.264 video or use compatibility mode.')
+      setError('That track cannot be switched without encoding. Direct Stream supports AAC/MP3 audio on H.264 video.')
       return
     }
 
@@ -239,6 +266,8 @@ export function WatchPage(){
       compatibilityAttemptedRef.current=false
       setError('')
       setPlayback(next)
+      setCanDirectSwitch(true)
+      setAudioMenuOpen(true)
     }catch(e:any){
       setError(`Unable to switch Plex audio track: ${e.message}`)
     }finally{
@@ -300,12 +329,12 @@ export function WatchPage(){
   const deliveryLabel=playback?.stream_mode==='direct'
     ?'DIRECT PLEX'
     :playback?.stream_mode==='direct_stream'
-      ?'DIRECT STREAM'
+      ?'DIRECT STREAM // NO ENCODE'
       :playback?.stream_mode==='audio'
         ?'VIDEO COPY + AAC AUDIO'
         :'COMPATIBILITY'
-  const switchableTracks=(playback?.audio_tracks||[]).filter(track=>['aac','mp3'].includes((track.codec||'').toLowerCase()))
-  const canDirectSwitch=['h264','avc'].includes((playback?.media.video_codec||'').toLowerCase())
+  const audioTracks=playback?.audio_tracks||[]
+  const videoDirectSwitch=canDirectSwitch??['h264','avc'].includes((playback?.media.video_codec||'').toLowerCase())
 
   return <div ref={shellRef} className={`watch-shell ${controlsVisible?'controls-visible':''}`} onMouseMove={showControls} onClick={showControls}>
     <video
@@ -338,7 +367,7 @@ export function WatchPage(){
         <strong>{item?.title}</strong>
         {item?.media_type==='episode'&&<span>S{String(item.season_number??0).padStart(2,'0')} E{String(item.episode_number??0).padStart(2,'0')}</span>}
       </div>
-      {playback?.audio_warning&&<div className="watch-audio-warning"><span>{playback.audio_warning}</span><button onClick={()=>{void compatibilityPlayback()}}>COMPATIBILITY AUDIO</button></div>}
+      {playback?.audio_warning&&<div className="watch-audio-warning"><span>{playback.audio_warning}</span><button onClick={()=>{void compatibilityPlayback()}}>COMPATIBILITY</button></div>}
       {error&&<div className="watch-inline-error">{error}</div>}
       <div className="watch-progress-row">
         <span>{formatTime(current)}</span>
@@ -351,7 +380,10 @@ export function WatchPage(){
         <button onClick={()=>skip(10)} title="Forward 10 seconds"><SkipForward size={22}/><small>10</small></button>
         <button onClick={toggleMute}>{muted||volume===0?<VolumeX size={24}/>:<Volume2 size={24}/>}</button>
         <input className="watch-volume" aria-label="Volume" type="range" min={0} max={1} step="0.05" value={muted?0:volume} onChange={e=>setPlayerVolume(Number(e.target.value))}/>
-        {canDirectSwitch&&switchableTracks.length>1&&<label className="watch-audio-picker"><span>AUDIO</span><select aria-label="Audio track" disabled={audioSwitching} value={playback?.selected_audio_stream_id||''} onChange={e=>{void switchAudioTrack(e.target.value)}}>{switchableTracks.map(track=><option key={track.id} value={track.id}>{audioTrackLabel(track)}</option>)}</select></label>}
+        <div className="watch-audio-menu-wrap">
+          <button className="watch-audio-button" disabled={audioLoading} onClick={()=>{void loadAudioTracks()}}>{audioLoading?'AUDIO…':'AUDIO'}</button>
+          {audioMenuOpen&&<div className="watch-audio-menu">{audioTracks.length?<><div className="watch-audio-menu-title">PLEX AUDIO TRACKS</div><select aria-label="Audio track" disabled={audioSwitching||!videoDirectSwitch} value={playback?.selected_audio_stream_id||''} onChange={e=>{void switchAudioTrack(e.target.value)}}>{audioTracks.map(track=>{const supported=videoDirectSwitch&&['aac','mp3'].includes((track.codec||'').toLowerCase());return <option key={track.id} value={track.id} disabled={!supported}>{audioTrackLabel(track)}{supported?'':' · encode required'}</option>})}</select><small>{videoDirectSwitch?'AAC/MP3 tracks switch with no codec encoding.':'This video codec cannot switch embedded tracks in-browser without compatibility mode.'}</small></>:<span>NO AUDIO TRACKS REPORTED BY PLEX</span>}</div>}
+        </div>
         <div className="watch-spacer"/>
         {navigation.previous&&<button className="watch-episode-btn" onClick={()=>switchEpisode(navigation.previous)}><ChevronLeft size={20}/> PREV EP</button>}
         {navigation.next&&<button className="watch-episode-btn" onClick={()=>switchEpisode(navigation.next)}>NEXT EP <ChevronRight size={20}/></button>}
