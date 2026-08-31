@@ -1,6 +1,8 @@
 from urllib.parse import parse_qs, urlparse
 
 from app.api.playback_web import _build_browser_transcode_url, _rewrite_browser_playlist
+from app.models.models import MovieMedia
+from app.services.playback.service import PlaybackService
 from app.services.plex.service import PlexService
 
 
@@ -40,3 +42,15 @@ def test_browser_hls_playlist_uses_same_origin_proxy_paths():
     assert "http://plex:32400" not in rewritten
     assert "https://" not in rewritten
     assert rewritten.count("/stream/temporary-token/hls/") == 2
+
+
+def test_browser_native_requires_browser_safe_audio():
+    aac = MovieMedia(container="mp4", video_codec="h264", audio_codec="aac")
+    ac3 = MovieMedia(container="mp4", video_codec="h264", audio_codec="ac3")
+    eac3 = MovieMedia(container="mp4", video_codec="h264", audio_codec="eac3")
+    hevc = MovieMedia(container="mp4", video_codec="hevc", audio_codec="aac")
+
+    assert PlaybackService.browser_native_media(aac) is True
+    assert PlaybackService.browser_native_media(ac3) is False
+    assert PlaybackService.browser_native_media(eac3) is False
+    assert PlaybackService.browser_native_media(hevc) is False
