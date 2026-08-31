@@ -20,11 +20,21 @@ PLEX_PINS = "https://clients.plex.tv/api/v2/pins"
 PLEX_NONCE = "https://clients.plex.tv/api/v2/auth/nonce"
 PLEX_TOKEN = "https://clients.plex.tv/api/v2/auth/token"
 PLEX_RESOURCES = "https://clients.plex.tv/api/v2/resources"
+PLEX_DEVICES = (
+    "https://clients.plex.tv/api/v2/devices",
+    "https://plex.tv/api/v2/devices",
+)
 PLEX_AUTH_APP = "https://app.plex.tv/auth#?"
 
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _is_legacy_pms_token(token: str) -> bool:
+    # Plex's classic PMS tokens are 20-character opaque strings. JWT account
+    # tokens currently returned by /resources can be rejected by PMS with 401.
+    return len(token) == 20 and "." not in token
 
 
 @dataclass(slots=True)
@@ -219,28 +229,88 @@ class PlexAccountService:
                 message = message.replace(token, "[redacted]")
             return False, message[:500]
 
-    def resources(self) -> list[dict]:
-        token = self.account_token(refresh=True)
-        if not token:
+    def _pms_tokens_from_devices(self, account_token: str) -> dict[str, str]:
+        last_error: Exception | None = None
+        for endpoint in PLEX_DEVICES:
+            try:
+                response = httpx.get(
+                    endpoint,
+                    headers=self.headers(account_token),
+                    timeout=20,
+                    follow_redirects=True,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                devices = payload if isinstance(payload, list) else payload.get("devices", [])
+                result: dict[str, str] = {}
+                for device in devices:
+                    if not isinstance(device, dict):
+                        continue
+                    provides = str(device.get("provides") or "")
+                    if "server" not in provides:
+                        continue
+                    identifier = str(device.get("clientIdentifier") or "")
+                    device_token = str(device.get("token") or "")
+                    if identifier and device_token:
+                        result[identifier] = device_token
+                return result
+            except Exception as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        return {}
+
+    def resources(self, probe: bool = True) -> list[dict]:
+        account_token = self.account_token(refresh=True)
+        if not account_token:
             return []
+
         response = httpx.get(
             PLEX_RESOURCES,
             params={"includeHttps": 1, "includeRelay": 1, "includeIPv6": 1},
-            headers=self.headers(token),
+            headers=self.headers(account_token),
             timeout=20,
         )
         response.raise_for_status()
+
+        device_tokens: dict[str, str] = {}
+        device_token_error: str | None = None
+        try:
+            device_tokens = self._pms_tokens_from_devices(account_token)
+        except Exception as exc:
+            device_token_error = f"{type(exc).__name__}: {exc}"[:500]
+
         resources = []
         for item in response.json():
-            if "server" not in (item.get("provides") or ""):
+            if "server" not in str(item.get("provides") or ""):
                 continue
-            server_token = str(item.get("accessToken") or "")
+
+            identifier = str(item.get("clientIdentifier") or "")
+            resource_token = str(item.get("accessToken") or "")
+            server_token = device_tokens.get(identifier, "")
+            token_source = "devices" if server_token else ""
+            if not server_token and _is_legacy_pms_token(resource_token):
+                server_token = resource_token
+                token_source = "resources_legacy"
+
             connections = []
             for connection in item.get("connections") or []:
                 uri = connection.get("uri")
                 if not uri:
                     continue
-                reachable, error = self._probe_connection(str(uri), server_token) if server_token else (False, "No server token")
+                if not server_token:
+                    if resource_token and not _is_legacy_pms_token(resource_token):
+                        token_error = (
+                            "Plex returned a JWT resource token, but this PMS requires a legacy server token. "
+                            "No matching /api/v2/devices token was available."
+                        )
+                    else:
+                        token_error = device_token_error or "No PMS-compatible server token was returned by Plex"
+                    reachable, error = False, token_error
+                elif probe:
+                    reachable, error = self._probe_connection(str(uri), server_token)
+                else:
+                    reachable, error = False, None
                 connections.append(
                     {
                         "uri": uri,
@@ -262,9 +332,11 @@ class PlexAccountService:
             resources.append(
                 {
                     "name": item.get("name"),
-                    "client_identifier": item.get("clientIdentifier"),
+                    "client_identifier": identifier,
                     "owned": bool(item.get("owned")),
-                    "access_token": item.get("accessToken"),
+                    "access_token": server_token,
+                    "token_source": token_source,
+                    "pms_token_available": bool(server_token),
                     "connections": connections,
                 }
             )
