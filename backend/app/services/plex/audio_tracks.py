@@ -74,7 +74,11 @@ def fetch_audio_tracks(
         ]
 
     server = PlexApiServer(plex.base_url, plex.token, timeout=20)
-    key: int | str = int(rating_key) if str(rating_key).isdigit() else f"/library/metadata/{rating_key}"
+    key: int | str = (
+        int(rating_key)
+        if str(rating_key).isdigit()
+        else f"/library/metadata/{rating_key}"
+    )
     item = server.fetchItem(key)
 
     fallback: list[dict[str, Any]] = []
@@ -167,14 +171,15 @@ def choose_direct_browser_audio_track(
     if not candidates:
         return None
 
-    def score(track: dict[str, Any]) -> tuple[int, int, int, int, int]:
+    def score(track: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
         language = _track_language(track)
         same_language = int(bool(primary_language) and language == primary_language)
         commentary_match = int(_looks_like_commentary(track) == primary_commentary)
         selected = int(bool(track.get("selected")))
         default = int(bool(track.get("default")))
+        aac = int(str(track.get("codec") or "").lower() == "aac")
         stereo = int((track.get("channels") or 99) <= 2)
-        return (same_language, commentary_match, selected, default, stereo)
+        return (same_language, commentary_match, selected, default, aac, stereo)
 
     return max(candidates, key=score)
 
@@ -196,7 +201,9 @@ def ensure_audio_tracks(
 ) -> list[dict[str, Any]]:
     """Return cached tracks, lazily filling old scan rows from Plex when needed."""
     tracks = cached_audio_tracks(movie, media)
-    if tracks and all("media_index" in track and "part_index" in track for track in tracks):
+    if tracks and all(
+        "media_index" in track and "part_index" in track for track in tracks
+    ):
         return tracks
 
     try:
