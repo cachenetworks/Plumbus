@@ -17,9 +17,10 @@ from app.api.playback import (
     _plex_media_headers,
 )
 from app.db.database import get_db
-from app.models.models import MovieMedia, User
+from app.models.models import Movie, MovieMedia, User
 from app.security.secrets import decrypt_secret, encrypt_secret
 from app.security.security import get_current_user
+from app.services.playback.service import PlaybackService
 from app.services.plex.audio_tracks import (
     BROWSER_COPY_AUDIO_CODECS,
     BROWSER_COPY_VIDEO_CODECS,
@@ -34,6 +35,7 @@ router = APIRouter(tags=["browser-playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 BrowserMode = Literal["direct", "compatibility"]
 BROWSER_AUDIO_CODECS = {"", "aac", "mp3"}
+BROWSER_DIRECT_CONTAINERS = {"mp4", "m4v"}
 
 # HLS is only used for a no-encode Direct Stream/remux or as a final full
 # compatibility fallback. Keep the Plex connection pool warm for both cases.
@@ -127,7 +129,7 @@ def _build_browser_audio_url(
     rating_key: str,
     media: MovieMedia,
 ) -> str:
-    """Legacy last-resort path: copy video while converting unsupported audio."""
+    """Last-resort path: copy video while converting unsupported audio."""
     session = uuid4().hex
     source_bitrate = int(media.bitrate or 0)
     profile_extra = (
@@ -250,6 +252,31 @@ def _public_audio_track(track: dict) -> dict:
     }
 
 
+def _audio_tracks_for_media(db: Session, movie: Movie, media: MovieMedia) -> list[dict]:
+    return ensure_audio_tracks(db, movie, media, _movie_plex(db, movie))
+
+
+@router.get("/api/playback/media/{media_id}/audio-tracks")
+def browser_audio_tracks(
+    media_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    movie = db.get(Movie, media_id)
+    if not movie:
+        raise HTTPException(404, "Media item not found")
+    if movie.media_type not in {"movie", "episode"}:
+        raise HTTPException(409, "Only movies and episodes have audio tracks")
+    media = PlaybackService(db).select_best_media(movie, target="browser")
+    tracks = _audio_tracks_for_media(db, movie, media)
+    primary = primary_audio_track(tracks)
+    return {
+        "audio_tracks": [_public_audio_track(track) for track in tracks],
+        "selected_audio_stream_id": str(primary.get("id") or "") if primary else None,
+        "can_direct_switch": str(media.video_codec or "").lower() in BROWSER_COPY_VIDEO_CODECS,
+    }
+
+
 @router.post("/api/playback/media/{media_id}/browser")
 def browser_playback(
     media_id: int,
@@ -276,12 +303,21 @@ def browser_playback(
     _token, _playback_user, movie, media = _active_playback(raw_token, db)
     plex = _movie_plex(db, movie)
     source_audio_codec = str(result["media"].get("audio_codec") or "").lower()
+    source_container = str(result["media"].get("container") or "").lower()
+    source_video_codec = str(result["media"].get("video_codec") or "").lower()
+    needs_container_remux = (
+        source_video_codec in BROWSER_COPY_VIDEO_CODECS
+        and source_container not in BROWSER_DIRECT_CONTAINERS
+    )
 
-    # Native AAC/MP3 Direct Play should start immediately. Only inspect Plex's
-    # full stream list when the indexed primary audio is problematic, or when a
-    # caller explicitly asks to switch tracks.
+    # Native MP4/M4V + AAC/MP3 Direct Play starts without another Plex metadata
+    # request. Track discovery is lazy unless the source needs audio/container
+    # help or a user explicitly asks to switch tracks.
     tracks: list[dict] = []
-    if audio_stream_id or (mode == "direct" and source_audio_codec not in BROWSER_AUDIO_CODECS):
+    if audio_stream_id or (
+        mode == "direct"
+        and (source_audio_codec not in BROWSER_AUDIO_CODECS or needs_container_remux)
+    ):
         tracks = ensure_audio_tracks(db, movie, media, plex)
         result["audio_tracks"] = [_public_audio_track(track) for track in tracks]
         primary = primary_audio_track(tracks)
@@ -301,7 +337,7 @@ def browser_playback(
                 raise HTTPException(409, "Requested audio track is not browser-copy compatible")
             if str(media.video_codec or "").lower() not in BROWSER_COPY_VIDEO_CODECS:
                 raise HTTPException(409, "This video codec cannot switch audio tracks without encoding video")
-        elif source_audio_codec not in BROWSER_AUDIO_CODECS:
+        elif source_audio_codec not in BROWSER_AUDIO_CODECS or needs_container_remux:
             chosen = choose_direct_browser_audio_track(
                 tracks,
                 video_codec=media.video_codec,
@@ -327,6 +363,10 @@ def browser_playback(
         if source_audio_codec not in BROWSER_AUDIO_CODECS:
             result["audio_warning"] = (
                 "The original file uses an audio codec this browser may not decode, and Plex does not expose a compatible AAC/MP3 track that can be copied directly."
+            )
+        elif needs_container_remux:
+            result["audio_warning"] = (
+                "This H.264 source uses a browser-unfriendly container and Plex did not expose a copy-compatible audio track for a no-encode remux."
             )
         return result
 
