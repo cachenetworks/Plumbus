@@ -1,7 +1,9 @@
+from collections import defaultdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -9,6 +11,7 @@ from app.models.models import AuditLog, Movie, MovieMedia, MovieTag, PlexLibrary
 from app.security.security import get_current_user, require_role
 from app.services.playback.service import PlaybackService
 from app.services.plex.service import PlexService
+from app.services.settings import ApplicationSettingsService
 
 router = APIRouter(prefix="/api/movies", tags=["media"])
 
@@ -35,123 +38,202 @@ def _effective(media_item: Movie, key: str):
     return getattr(media_item, key) if value is None else value
 
 
-def _media_dict(media_item: Movie, db: Session, detail: bool = False) -> dict:
-    media = db.scalars(select(MovieMedia).where(MovieMedia.movie_id == media_item.id)).all()
-    tags = db.scalars(select(MovieTag).where(MovieTag.movie_id == media_item.id)).all()
-    library = db.get(PlexLibrary, media_item.library_id)
-    server = db.get(PlexServer, library.server_id) if library else None
-    grouped: dict[str, list[str]] = {}
-    for tag in tags:
-        grouped.setdefault(tag.kind, []).append(tag.value)
-    is_anime = bool(library and "anime" in library.title.lower()) or any(
-        value.lower() == "anime" for value in grouped.get("genre", [])
-    )
-    item = {
-        "id": media_item.id,
-        "media_type": media_item.media_type,
-        "title": _effective(media_item, "title"),
-        "year": _effective(media_item, "year"),
-        "content_rating": _effective(media_item, "content_rating"),
-        "poster_url": f"/media/poster/{media_item.id}" if media_item.poster_key else None,
-        "backdrop_url": f"/media/backdrop/{media_item.id}" if media_item.art_key else None,
-        "genres": grouped.get("genre", []),
-        "collections": grouped.get("collection", []),
-        "qualities": sorted({m.resolution for m in media if m.resolution}),
-        "playable": bool(media),
-        "is_anime": is_anime,
-        "season_number": media_item.season_number,
-        "episode_number": media_item.episode_number,
-        "parent_title": media_item.parent_title,
-        "grandparent_title": media_item.grandparent_title,
-        "library": {
-            "id": library.id,
-            "title": library.title,
-            "type": library.library_type,
-            "server_id": library.server_id,
-            "server_name": server.server_name if server else None,
-        } if library else None,
-        "added_at": media_item.added_at,
-        "updated_at": media_item.plex_updated_at,
-    }
-    if detail:
-        playback = PlaybackService(db)
-        item.update(
-            {
-                "original_title": media_item.original_title,
-                "summary": _effective(media_item, "summary"),
-                "tagline": _effective(media_item, "tagline"),
-                "duration_ms": media_item.duration_ms,
-                "studio": media_item.studio,
-                "rating": media_item.rating,
-                "audience_rating": media_item.audience_rating,
-                "edition_title": media_item.edition_title,
-                "directors": grouped.get("director", []),
-                "actors": grouped.get("actor", []),
-                "writers": grouped.get("writer", []),
-                "labels": grouped.get("label", []),
-                "media": [
-                    {
-                        "id": m.id,
-                        "container": m.container,
-                        "video_codec": m.video_codec,
-                        "audio_codec": m.audio_codec,
-                        "width": m.width,
-                        "height": m.height,
-                        "resolution": m.resolution,
-                        "bitrate": m.bitrate,
-                        "hdr": m.hdr,
-                        "audio_channels": m.audio_channels,
-                        "file_size": m.file_size,
-                        **playback.get_media_info(m),
-                    }
-                    for m in media
-                ],
-                "local_overrides": dict(media_item.local_overrides or {}),
-            }
+def _serialize_many(
+    items: list[Movie],
+    db: Session,
+    *,
+    detail: bool = False,
+    include_tags: bool = True,
+) -> list[dict]:
+    """Serialize a result set using batched queries instead of per-title N+1 reads."""
+    if not items:
+        return []
+
+    ids = [item.id for item in items]
+    media_rows = db.scalars(select(MovieMedia).where(MovieMedia.movie_id.in_(ids))).all()
+    media_by: dict[int, list[MovieMedia]] = defaultdict(list)
+    for media in media_rows:
+        media_by[media.movie_id].append(media)
+
+    tags_by: dict[int, list[MovieTag]] = defaultdict(list)
+    if include_tags:
+        tag_rows = db.scalars(select(MovieTag).where(MovieTag.movie_id.in_(ids))).all()
+        for tag in tag_rows:
+            tags_by[tag.movie_id].append(tag)
+
+    library_ids = {item.library_id for item in items}
+    libraries = db.scalars(select(PlexLibrary).where(PlexLibrary.id.in_(library_ids))).all()
+    library_by = {library.id: library for library in libraries}
+    server_ids = {library.server_id for library in libraries}
+    servers = db.scalars(select(PlexServer).where(PlexServer.id.in_(server_ids))).all() if server_ids else []
+    server_by = {server.id: server for server in servers}
+
+    playback = PlaybackService(db)
+    playback_prefs = ApplicationSettingsService(db).playback() if detail else None
+    output: list[dict] = []
+
+    for media_item in items:
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for tag in tags_by.get(media_item.id, []):
+            grouped[tag.kind].append(tag.value)
+        media = media_by.get(media_item.id, [])
+        library = library_by.get(media_item.library_id)
+        server = server_by.get(library.server_id) if library else None
+        is_anime = bool(library and "anime" in library.title.lower()) or any(
+            value.lower() == "anime" for value in grouped.get("genre", [])
         )
-    return item
+        item = {
+            "id": media_item.id,
+            "media_type": media_item.media_type,
+            "title": _effective(media_item, "title"),
+            "year": _effective(media_item, "year"),
+            "content_rating": _effective(media_item, "content_rating"),
+            "poster_url": f"/media/poster/{media_item.id}" if media_item.poster_key else None,
+            "backdrop_url": f"/media/backdrop/{media_item.id}" if media_item.art_key else None,
+            "genres": grouped.get("genre", []),
+            "collections": grouped.get("collection", []),
+            "qualities": sorted({m.resolution for m in media if m.resolution}),
+            "playable": bool(media),
+            "is_anime": is_anime,
+            "season_number": media_item.season_number,
+            "episode_number": media_item.episode_number,
+            "parent_title": media_item.parent_title,
+            "grandparent_title": media_item.grandparent_title,
+            "library": {
+                "id": library.id,
+                "title": library.title,
+                "type": library.library_type,
+                "server_id": library.server_id,
+                "server_name": server.server_name if server else None,
+            }
+            if library
+            else None,
+            "added_at": media_item.added_at,
+            "updated_at": media_item.plex_updated_at,
+        }
+        if detail:
+            item.update(
+                {
+                    "original_title": media_item.original_title,
+                    "summary": _effective(media_item, "summary"),
+                    "tagline": _effective(media_item, "tagline"),
+                    "duration_ms": media_item.duration_ms,
+                    "studio": media_item.studio,
+                    "rating": media_item.rating,
+                    "audience_rating": media_item.audience_rating,
+                    "edition_title": media_item.edition_title,
+                    "directors": grouped.get("director", []),
+                    "actors": grouped.get("actor", []),
+                    "writers": grouped.get("writer", []),
+                    "labels": grouped.get("label", []),
+                    "media": [
+                        {
+                            "id": m.id,
+                            "container": m.container,
+                            "video_codec": m.video_codec,
+                            "audio_codec": m.audio_codec,
+                            "width": m.width,
+                            "height": m.height,
+                            "resolution": m.resolution,
+                            "bitrate": m.bitrate,
+                            "hdr": m.hdr,
+                            "audio_channels": m.audio_channels,
+                            "file_size": m.file_size,
+                            **playback.get_media_info(m, playback_prefs),
+                        }
+                        for m in media
+                    ],
+                    "local_overrides": dict(media_item.local_overrides or {}),
+                }
+            )
+        output.append(item)
+    return output
+
+
+def _media_dict(media_item: Movie, db: Session, detail: bool = False) -> dict:
+    return _serialize_many([media_item], db, detail=detail)[0]
+
+
+def _add_show_counts(items: list[Movie], payloads: list[dict], db: Session) -> None:
+    shows = [item for item in items if item.media_type == "show"]
+    if not shows:
+        return
+    library_ids = {item.library_id for item in shows}
+    show_keys = {item.rating_key for item in shows}
+    counts = db.execute(
+        select(Movie.library_id, Movie.grandparent_rating_key, func.count(Movie.id))
+        .where(
+            Movie.media_type == "episode",
+            Movie.library_id.in_(library_ids),
+            Movie.grandparent_rating_key.in_(show_keys),
+        )
+        .group_by(Movie.library_id, Movie.grandparent_rating_key)
+    ).all()
+    count_by = {(library_id, key): count for library_id, key, count in counts}
+    payload_by_id = {item["id"]: item for item in payloads}
+    for show in shows:
+        payload_by_id[show.id]["episode_count"] = count_by.get((show.library_id, show.rating_key), 0)
 
 
 def _hierarchy(media_item: Movie, db: Session) -> dict:
     if media_item.media_type == "show":
         seasons = db.scalars(
-            select(Movie).where(
+            select(Movie)
+            .where(
                 Movie.library_id == media_item.library_id,
                 Movie.media_type == "season",
                 Movie.parent_rating_key == media_item.rating_key,
-            ).order_by(Movie.season_number.asc().nullslast(), Movie.title.asc())
+            )
+            .order_by(Movie.season_number.asc().nullslast(), Movie.title.asc())
         ).all()
-        episodes = db.scalars(
-            select(Movie).where(
-                Movie.library_id == media_item.library_id,
-                Movie.media_type == "episode",
-                Movie.grandparent_rating_key == media_item.rating_key,
-            ).order_by(Movie.season_number.asc().nullslast(), Movie.episode_number.asc().nullslast(), Movie.title.asc())
-        ).all()
-        by_season: dict[str, list[Movie]] = {}
-        for episode in episodes:
-            by_season.setdefault(episode.parent_rating_key or "", []).append(episode)
+        counts = dict(
+            db.execute(
+                select(Movie.parent_rating_key, func.count(Movie.id))
+                .where(
+                    Movie.library_id == media_item.library_id,
+                    Movie.media_type == "episode",
+                    Movie.grandparent_rating_key == media_item.rating_key,
+                )
+                .group_by(Movie.parent_rating_key)
+            ).all()
+        )
+        season_payloads = _serialize_many(list(seasons), db, include_tags=False)
+        for season, payload in zip(seasons, season_payloads, strict=False):
+            payload["episode_count"] = counts.get(season.rating_key, 0)
         return {
             "season_count": len(seasons),
-            "episode_count": len(episodes),
-            "seasons": [
-                {
-                    **_media_dict(season, db, detail=True),
-                    "episodes": [_media_dict(ep, db, detail=True) for ep in by_season.get(season.rating_key, [])],
-                }
-                for season in seasons
-            ],
+            "episode_count": sum(counts.values()),
+            "seasons": season_payloads,
         }
     if media_item.media_type == "season":
-        episodes = db.scalars(
-            select(Movie).where(
+        episode_count = db.scalar(
+            select(func.count(Movie.id)).where(
                 Movie.library_id == media_item.library_id,
                 Movie.media_type == "episode",
                 Movie.parent_rating_key == media_item.rating_key,
-            ).order_by(Movie.episode_number.asc().nullslast(), Movie.title.asc())
-        ).all()
-        return {"episode_count": len(episodes), "episodes": [_media_dict(ep, db, detail=True) for ep in episodes]}
+            )
+        )
+        return {"episode_count": int(episode_count or 0), "episodes": []}
     return {}
+
+
+def _search_rank(q: str):
+    normalized = q.strip().lower()
+    like = f"%{q.strip()}%"
+    prefix = f"{q.strip()}%"
+    tag_match = exists().where(
+        MovieTag.movie_id == Movie.id,
+        MovieTag.kind.in_(("actor", "director", "genre", "collection")),
+        MovieTag.value.ilike(like),
+    )
+    return case(
+        (func.lower(Movie.title) == normalized, 0),
+        (Movie.title.ilike(prefix), 1),
+        (Movie.title.ilike(like), 2),
+        (Movie.original_title.ilike(prefix), 3),
+        (tag_match, 4),
+        else_=5,
+    )
 
 
 @router.get("")
@@ -166,23 +248,26 @@ def browse(
     media_type: str | None = Query(default=None, pattern="^(movie|show)$"),
     anime: bool = Query(default=False),
     sort: str = Query(default="recent", pattern="^(recent|updated|alphabetical)$"),
-    limit: int = Query(default=60, ge=1, le=200),
+    limit: int = Query(default=36, ge=1, le=120),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     stmt = _base_query(user)
-    if q:
+    search_rank = None
+    if q and q.strip():
+        q = q.strip()
         like = f"%{q}%"
-        clauses = [
-            Movie.title.ilike(like),
-            Movie.original_title.ilike(like),
-            PlexLibrary.title.ilike(like),
-            exists().where(MovieTag.movie_id == Movie.id, MovieTag.value.ilike(like)),
-        ]
+        tag_match = exists().where(
+            MovieTag.movie_id == Movie.id,
+            MovieTag.kind.in_(("actor", "director", "genre", "collection")),
+            MovieTag.value.ilike(like),
+        )
+        clauses = [Movie.title.ilike(like), Movie.original_title.ilike(like), tag_match]
         if q.isdigit() and 1880 <= int(q) <= 2200:
             clauses.append(Movie.year == int(q))
         stmt = stmt.where(or_(*clauses))
+        search_rank = _search_rank(q)
     if year:
         stmt = stmt.where(Movie.year == year)
     if library_id:
@@ -201,19 +286,25 @@ def browse(
     if genre:
         stmt = stmt.where(exists().where(MovieTag.movie_id == Movie.id, MovieTag.kind == "genre", MovieTag.value == genre))
     if collection:
-        stmt = stmt.where(exists().where(MovieTag.movie_id == Movie.id, MovieTag.kind == "collection", MovieTag.value == collection))
+        stmt = stmt.where(
+            exists().where(MovieTag.movie_id == Movie.id, MovieTag.kind == "collection", MovieTag.value == collection)
+        )
     if resolution:
         stmt = stmt.where(exists().where(MovieMedia.movie_id == Movie.id, MovieMedia.resolution == resolution))
 
-    if sort == "alphabetical":
+    if search_rank is not None:
+        stmt = stmt.order_by(search_rank, Movie.title.asc(), Movie.year.desc().nullslast())
+    elif sort == "alphabetical":
         stmt = stmt.order_by(Movie.title.asc(), Movie.year.desc().nullslast())
     elif sort == "updated":
         stmt = stmt.order_by(Movie.plex_updated_at.desc().nullslast(), Movie.title.asc())
     else:
         stmt = stmt.order_by(Movie.added_at.desc().nullslast(), Movie.title.asc())
 
-    items = db.scalars(stmt.offset(offset).limit(limit)).unique().all()
-    return {"items": [_media_dict(item, db) for item in items], "offset": offset, "limit": limit}
+    items = list(db.scalars(stmt.offset(offset).limit(limit)).unique().all())
+    payloads = _serialize_many(items, db)
+    _add_show_counts(items, payloads, db)
+    return {"items": payloads, "offset": offset, "limit": limit}
 
 
 @router.get("/search/suggest")
@@ -222,18 +313,107 @@ def search_suggest(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> list[dict]:
+    q = q.strip()
     like = f"%{q}%"
-    condition = or_(
-        Movie.title.ilike(like),
-        exists().where(MovieTag.movie_id == Movie.id, MovieTag.value.ilike(like)),
+    tag_match = exists().where(
+        MovieTag.movie_id == Movie.id,
+        MovieTag.kind.in_(("actor", "director", "genre", "collection")),
+        MovieTag.value.ilike(like),
     )
+    condition = or_(Movie.title.ilike(like), Movie.original_title.ilike(like), tag_match)
     if q.isdigit() and 1880 <= int(q) <= 2200:
         condition = or_(condition, Movie.year == int(q))
-    items = db.scalars(_base_query(user).where(condition).order_by(Movie.title).limit(8)).all()
+    items = db.scalars(
+        _base_query(user).where(condition).order_by(_search_rank(q), Movie.title.asc()).limit(10)
+    ).all()
     return [
         {"id": m.id, "media_type": m.media_type, "title": _effective(m, "title"), "year": _effective(m, "year")}
         for m in items
     ]
+
+
+@router.get("/collections/list")
+def collections_list(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    stmt = (
+        select(MovieTag.value, Movie)
+        .join(Movie, Movie.id == MovieTag.movie_id)
+        .join(PlexLibrary, PlexLibrary.id == Movie.library_id)
+        .where(
+            MovieTag.kind == "collection",
+            PlexLibrary.enabled.is_(True),
+            Movie.media_type.in_(("movie", "show")),
+        )
+        .order_by(MovieTag.value.asc(), Movie.added_at.desc().nullslast())
+    )
+    if user.role == Role.MEMBER:
+        stmt = stmt.where(PlexLibrary.visible_to_members.is_(True))
+    rows = db.execute(stmt).all()
+    grouped: dict[str, dict] = {}
+    for name, media_item in rows:
+        entry = grouped.setdefault(
+            name,
+            {
+                "name": name,
+                "count": 0,
+                "movie_count": 0,
+                "show_count": 0,
+                "representative_media_id": media_item.id,
+                "representative_title": media_item.title,
+                "poster_url": f"/media/poster/{media_item.id}" if media_item.poster_key else None,
+            },
+        )
+        entry["count"] += 1
+        if media_item.media_type == "show":
+            entry["show_count"] += 1
+        else:
+            entry["movie_count"] += 1
+        if entry["poster_url"] is None and media_item.poster_key:
+            entry["representative_media_id"] = media_item.id
+            entry["representative_title"] = media_item.title
+            entry["poster_url"] = f"/media/poster/{media_item.id}"
+    return {"collections": sorted(grouped.values(), key=lambda row: row["name"].casefold())}
+
+
+@router.get("/{media_id}/episodes")
+def media_episodes(
+    media_id: int,
+    season_number: int | None = Query(default=None, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    media_item = db.scalar(_base_query(user, top_level_only=False).where(Movie.id == media_id))
+    if not media_item:
+        raise HTTPException(404, "Media item not found")
+    if media_item.media_type not in {"show", "season"}:
+        raise HTTPException(409, "Episode listing is only available for shows and seasons")
+
+    if media_item.media_type == "show":
+        stmt = select(Movie).where(
+            Movie.library_id == media_item.library_id,
+            Movie.media_type == "episode",
+            Movie.grandparent_rating_key == media_item.rating_key,
+        )
+        if season_number is not None:
+            stmt = stmt.where(Movie.season_number == season_number)
+    else:
+        stmt = select(Movie).where(
+            Movie.library_id == media_item.library_id,
+            Movie.media_type == "episode",
+            Movie.parent_rating_key == media_item.rating_key,
+        )
+    stmt = stmt.order_by(Movie.season_number.asc().nullslast(), Movie.episode_number.asc().nullslast(), Movie.title.asc())
+    episodes = list(db.scalars(stmt).all())
+    payloads = _serialize_many(episodes, db, include_tags=False)
+    by_id = {episode.id: episode for episode in episodes}
+    for payload in payloads:
+        source = by_id[payload["id"]]
+        payload["summary"] = source.summary
+        payload["duration_ms"] = source.duration_ms
+        payload["rating"] = source.rating
+    return {"episodes": payloads, "count": len(payloads)}
 
 
 @router.get("/{media_id}")
@@ -302,10 +482,18 @@ def _art(media_id: int, attr: str, user: User, db: Session) -> Response:
     upstream = plex.artwork_response(plex_path)
     if upstream.status_code != 200:
         raise HTTPException(502, "Plex artwork unavailable")
+    headers = {
+        "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
+        "Vary": "Cookie",
+    }
+    if upstream.headers.get("etag"):
+        headers["ETag"] = upstream.headers["etag"]
+    if upstream.headers.get("last-modified"):
+        headers["Last-Modified"] = upstream.headers["last-modified"]
     return Response(
         upstream.content,
         media_type=upstream.headers.get("content-type", "image/jpeg"),
-        headers={"Cache-Control": "private, max-age=3600", "Vary": "Cookie"},
+        headers=headers,
     )
 
 
