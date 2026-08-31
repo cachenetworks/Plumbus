@@ -20,7 +20,7 @@ class ApplicationSettingsService:
             values.update({key: value for key, value in row.value.items() if key in values})
         return values
 
-    def set_playback(self, values: dict, updated_by_id: int) -> dict:
+    def set_playback(self, values: dict, updated_by_id: int | None = None) -> dict:
         row = self.db.get(ApplicationSetting, "playback")
         if row is None:
             row = ApplicationSetting(key="playback", value={}, updated_by_id=updated_by_id)
