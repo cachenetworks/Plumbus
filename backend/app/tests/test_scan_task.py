@@ -2,6 +2,7 @@ from sqlalchemy import select
 
 from app.models.models import Movie, MovieMedia, PlexLibrary, PlexScanJob, PlexServer
 from app.security.secrets import encrypt_secret
+from app.services.plex.scanner import _unique_tags
 from app.workers.tasks import scan_library
 
 
@@ -16,6 +17,22 @@ def _server(db) -> PlexServer:
     db.add(server)
     db.flush()
     return server
+
+
+def test_duplicate_plex_tags_are_sanitized_before_insert() -> None:
+    payload = {
+        "genres": ["Anime", "Anime", " anime ", ""],
+        "actors": ["Mark Duncan", "Mark Duncan", " mark duncan ", None],
+        "directors": [],
+        "writers": [],
+        "collections": [],
+        "labels": [],
+    }
+
+    assert _unique_tags(payload) == [
+        ("genre", "Anime"),
+        ("actor", "Mark Duncan"),
+    ]
 
 
 def test_scan_task_indexes_movies(db) -> None:
