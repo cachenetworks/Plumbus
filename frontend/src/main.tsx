@@ -6,6 +6,7 @@ import { SetupWizard } from './SetupWizard'
 import './styles.css'
 import './setup.css'
 import './crt.css'
+import './media.css'
 
 const Root = window.location.pathname === '/setup' ? SetupWizard : App
 
