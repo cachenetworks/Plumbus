@@ -17,7 +17,7 @@ from app.api.playback import (
     _plex_media_headers,
 )
 from app.db.database import get_db
-from app.models.models import Movie, MovieMedia, User
+from app.models.models import MovieMedia, User
 from app.security.secrets import decrypt_secret, encrypt_secret
 from app.security.security import get_current_user
 from app.services.plex.audio_tracks import (
@@ -275,12 +275,18 @@ def browser_playback(
     raw_token = parsed.path.removeprefix("/stream/").split("/", 1)[0]
     _token, _playback_user, movie, media = _active_playback(raw_token, db)
     plex = _movie_plex(db, movie)
-    tracks = ensure_audio_tracks(db, movie, media, plex)
-    result["audio_tracks"] = [_public_audio_track(track) for track in tracks]
+    source_audio_codec = str(result["media"].get("audio_codec") or "").lower()
 
-    primary = primary_audio_track(tracks)
-    if primary:
-        result["selected_audio_stream_id"] = str(primary.get("id") or "") or None
+    # Native AAC/MP3 Direct Play should start immediately. Only inspect Plex's
+    # full stream list when the indexed primary audio is problematic, or when a
+    # caller explicitly asks to switch tracks.
+    tracks: list[dict] = []
+    if audio_stream_id or (mode == "direct" and source_audio_codec not in BROWSER_AUDIO_CODECS):
+        tracks = ensure_audio_tracks(db, movie, media, plex)
+        result["audio_tracks"] = [_public_audio_track(track) for track in tracks]
+        primary = primary_audio_track(tracks)
+        if primary:
+            result["selected_audio_stream_id"] = str(primary.get("id") or "") or None
 
     if mode == "direct":
         chosen: dict | None = None
@@ -295,13 +301,11 @@ def browser_playback(
                 raise HTTPException(409, "Requested audio track is not browser-copy compatible")
             if str(media.video_codec or "").lower() not in BROWSER_COPY_VIDEO_CODECS:
                 raise HTTPException(409, "This video codec cannot switch audio tracks without encoding video")
-        else:
-            source_audio_codec = str(result["media"].get("audio_codec") or "").lower()
-            if source_audio_codec not in BROWSER_AUDIO_CODECS:
-                chosen = choose_direct_browser_audio_track(
-                    tracks,
-                    video_codec=media.video_codec,
-                )
+        elif source_audio_codec not in BROWSER_AUDIO_CODECS:
+            chosen = choose_direct_browser_audio_track(
+                tracks,
+                video_codec=media.video_codec,
+            )
 
         if chosen:
             result["delivery"] = "hls"
@@ -320,7 +324,7 @@ def browser_playback(
         result["browser_codec_profile"] = "ORIGINAL_PLEX_SOURCE"
         result["stream_mode"] = "direct"
         result["audio_strategy"] = "original_file"
-        if str(result["media"].get("audio_codec") or "").lower() not in BROWSER_AUDIO_CODECS:
+        if source_audio_codec not in BROWSER_AUDIO_CODECS:
             result["audio_warning"] = (
                 "The original file uses an audio codec this browser may not decode, and Plex does not expose a compatible AAC/MP3 track that can be copied directly."
             )
