@@ -17,7 +17,7 @@ from app.api.playback import (
     _plex_media_headers,
 )
 from app.db.database import get_db
-from app.models.models import User
+from app.models.models import MovieMedia, User
 from app.security.secrets import decrypt_secret, encrypt_secret
 from app.security.security import get_current_user
 from app.services.plex.service import PlexService
@@ -26,9 +26,10 @@ from app.services.settings import ApplicationSettingsService
 router = APIRouter(tags=["browser-playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 BrowserMode = Literal["direct", "compatibility"]
+BROWSER_AUDIO_CODECS = {"", "aac", "mp3"}
 
-# HLS is only used as a compatibility fallback now. Keep the pool warm when it
-# is needed so fallback playback does not reconnect for every segment.
+# HLS is only used when browser compatibility needs help. Keep the pool warm so
+# audio-only remuxes and full fallbacks do not reconnect for every segment.
 PLEX_STREAM_CLIENT = httpx.Client(
     timeout=None,
     follow_redirects=True,
@@ -66,6 +67,16 @@ def _browser_bitrate(prefs: dict) -> int:
         "2160p": 12000,
     }.get(preferred, 8000)
     return min(configured, ceiling)
+
+
+def _needs_audio_compat(media_info: dict) -> bool:
+    """Detect sources that browsers often render with video but silent audio."""
+    audio_codec = str(media_info.get("audio_codec") or "").lower()
+    return (
+        audio_codec not in BROWSER_AUDIO_CODECS
+        and bool(media_info.get("direct_play_candidate"))
+        and bool(media_info.get("allow_plex_transcoding"))
+    )
 
 
 def _build_browser_transcode_url(
@@ -113,6 +124,58 @@ def _build_browser_transcode_url(
     return f"{plex.base_url}/video/:/transcode/universal/start.m3u8?{urlencode(params)}"
 
 
+def _build_browser_audio_url(
+    plex: PlexService,
+    rating_key: str,
+    media: MovieMedia,
+) -> str:
+    """Ask PMS to copy the video track and convert only unsupported audio.
+
+    This uses Plex's Direct Stream path. H.264/HEVC video is permitted by the
+    client profile so PMS does not need to re-encode it merely to turn AC3,
+    EAC3, DTS or TrueHD into browser-safe AAC.
+    """
+    session = uuid4().hex
+    source_bitrate = int(media.bitrate or 0)
+    profile_extra = (
+        "add-transcode-target(type=videoProfile&context=streaming&protocol=hls"
+        "&container=mpegts&videoCodec=h264,hevc&audioCodec=aac&replace=true)"
+        "+add-limitation(scope=videoAudioCodec&scopeName=aac&type=upperBound"
+        "&name=audio.channels&value=2)"
+    )
+    params = {
+        "path": f"/library/metadata/{rating_key}",
+        "mediaIndex": 0,
+        "partIndex": 0,
+        "protocol": "hls",
+        "hasMDE": 1,
+        "offset": 0,
+        "fastSeek": 1,
+        "directPlay": 0,
+        "directStream": 1,
+        "directStreamAudio": 0,
+        "copyts": 1,
+        "videoQuality": 100,
+        # Keep the ceiling well above the source so bitrate policy cannot force
+        # an otherwise unnecessary video transcode.
+        "maxVideoBitrate": max(200000, source_bitrate + 1000),
+        "audioBoost": 100,
+        "subtitles": "none",
+        "mediaBufferSize": 204800,
+        "session": session,
+        "X-Plex-Session-Identifier": session,
+        "X-Plex-Client-Identifier": "plumbus-web-audio",
+        "X-Plex-Product": "Plumbus",
+        "X-Plex-Version": "1.0.0",
+        "X-Plex-Platform": "Chrome",
+        "X-Plex-Client-Platform": "Chrome",
+        "X-Plex-Client-Profile-Name": "Chrome",
+        "X-Plex-Client-Profile-Extra": profile_extra,
+        "X-Plex-Token": plex.token,
+    }
+    return f"{plex.base_url}/video/:/transcode/universal/start.m3u8?{urlencode(params)}"
+
+
 def _resolution(prefs: dict) -> str:
     return {
         "720p": "1280x720",
@@ -143,6 +206,17 @@ def browser_playback(
     relative = parsed.path
     if parsed.query:
         relative += f"?{parsed.query}"
+
+    # Direct Plex remains the default. The one proactive exception is an audio
+    # codec known to produce silent playback in browsers. In that case reuse the
+    # same temporary token and ask PMS to copy video + convert audio only.
+    if mode == "direct" and _needs_audio_compat(result["media"]):
+        result["delivery"] = "hls"
+        result["playback_url"] = f"{relative}/master.m3u8?audio_only=true"
+        result["browser_codec_profile"] = "VIDEO_COPY/AAC_AUDIO"
+        result["stream_mode"] = "audio"
+        return result
+
     result["playback_url"] = relative
     result["browser_codec_profile"] = (
         "ORIGINAL_PLEX_SOURCE" if mode == "direct" else "H.264/AAC"
@@ -152,19 +226,26 @@ def browser_playback(
 
 
 @router.get("/stream/{raw_token}/master.m3u8")
-def browser_transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
-    _token, _user, movie, _media = _active_playback(raw_token, db)
+def browser_transcode_master(
+    raw_token: str,
+    audio_only: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> Response:
+    _token, _user, movie, media = _active_playback(raw_token, db)
     prefs = ApplicationSettingsService(db).playback()
     if not bool(prefs["allow_plex_transcoding"]):
         raise HTTPException(409, "Plex transcoding is disabled")
 
     plex = _movie_plex(db, movie)
-    upstream_url = _build_browser_transcode_url(
-        plex,
-        movie.rating_key,
-        max_video_bitrate=_browser_bitrate(prefs),
-        video_resolution=_resolution(prefs),
-    )
+    if audio_only:
+        upstream_url = _build_browser_audio_url(plex, movie.rating_key, media)
+    else:
+        upstream_url = _build_browser_transcode_url(
+            plex,
+            movie.rating_key,
+            max_video_bitrate=_browser_bitrate(prefs),
+            video_resolution=_resolution(prefs),
+        )
     _assert_plex_url(plex, upstream_url)
 
     try:
@@ -188,8 +269,9 @@ def browser_transcode_master(raw_token: str, db: Session = Depends(get_db)) -> R
         media_type="application/vnd.apple.mpegurl",
         headers={
             "Cache-Control": "private, no-store",
-            "X-Plumbus-Video-Codec": "h264",
+            "X-Plumbus-Video-Codec": "copy" if audio_only else "h264",
             "X-Plumbus-Audio-Codec": "aac",
+            "X-Plumbus-Stream-Mode": "audio-only" if audio_only else "compatibility",
             "X-Plumbus-Max-Bitrate-Kbps": str(_browser_bitrate(prefs)),
         },
     )
