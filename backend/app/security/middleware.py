@@ -10,12 +10,12 @@ from starlette.responses import Response
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.models.models import AuditLog, Session as UserSession
+from app.models.models import ApplicationSetting, AuditLog, Session as UserSession
 from app.security.security import SESSION_COOKIE, token_hash
 
 
 class SecurityGateMiddleware(BaseHTTPMiddleware):
-    """Origin checks, throttling, security events and sanitized API request logs."""
+    """Host/origin checks, throttling, security events and sanitized API request logs."""
 
     def __init__(self, app):
         super().__init__(app)
@@ -38,6 +38,21 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
             return bool(parsed.netloc and parsed.netloc.lower() == request_host)
         except Exception:
             return False
+
+    @staticmethod
+    def _configured_host() -> str | None:
+        try:
+            with SessionLocal() as db:
+                state = db.get(ApplicationSetting, "setup_state")
+                if not state or not isinstance(state.value, dict) or not state.value.get("completed"):
+                    return None
+                site = db.get(ApplicationSetting, "site")
+                if not site or not isinstance(site.value, dict):
+                    return None
+                parsed = urlparse(str(site.value.get("app_url") or ""))
+                return parsed.netloc.lower() or None
+        except Exception:
+            return None
 
     @staticmethod
     def _actor_id(request: Request) -> int | None:
@@ -78,12 +93,23 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
                 )
                 db.commit()
         except Exception:
-            # Request logging must never take the API down if the database is unavailable.
             pass
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         started = perf_counter()
         path = request.url.path
+
+        if settings.APP_ENV == "production" and not path.startswith("/health"):
+            expected_host = self._configured_host()
+            request_host = request.headers.get("host", "").lower()
+            if expected_host and request_host != expected_host:
+                self._write_event(
+                    request,
+                    "security.host_rejected",
+                    {"method": request.method, "path": path},
+                    self._actor_id(request),
+                )
+                return JSONResponse({"detail": "Host not allowed"}, status_code=400)
 
         if request.method in {"POST", "PATCH", "PUT", "DELETE"} and path.startswith("/api/"):
             origin = request.headers.get("origin")
@@ -126,8 +152,6 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
 
         response = await call_next(request)
 
-        # Do not log stream/media bodies or health probes. Query strings are intentionally never
-        # persisted because webhook credentials and other sensitive values can appear there.
         if path.startswith("/api/") and not path.startswith("/api/webhooks/"):
             elapsed_ms = round((perf_counter() - started) * 1000, 2)
             self._write_event(
