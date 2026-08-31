@@ -31,6 +31,15 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
         return request.client.host if request.client else None
 
     @staticmethod
+    def _same_origin(request: Request, origin: str) -> bool:
+        try:
+            parsed = urlparse(origin)
+            request_host = request.headers.get("host", "").lower()
+            return bool(parsed.netloc and parsed.netloc.lower() == request_host)
+        except Exception:
+            return False
+
+    @staticmethod
     def _actor_id(request: Request) -> int | None:
         raw = request.cookies.get(SESSION_COOKIE)
         if not raw:
@@ -78,7 +87,7 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
 
         if request.method in {"POST", "PATCH", "PUT", "DELETE"} and path.startswith("/api/"):
             origin = request.headers.get("origin")
-            if origin and origin not in self.allowed_origins:
+            if origin and origin not in self.allowed_origins and not self._same_origin(request, origin):
                 self._write_event(
                     request,
                     "security.origin_rejected",
@@ -87,7 +96,11 @@ class SecurityGateMiddleware(BaseHTTPMiddleware):
                 )
                 return JSONResponse({"detail": "Origin not allowed"}, status_code=403)
 
-        sensitive = path.startswith("/api/auth/discord/") or path.startswith("/api/invites/")
+        sensitive = (
+            path.startswith("/api/auth/discord/")
+            or path.startswith("/api/invites/")
+            or path.startswith("/api/setup/")
+        )
         if sensitive:
             ip = self._ip(request) or "unknown"
             bucket = int(__import__("time").time() // 300)
