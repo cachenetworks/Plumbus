@@ -1,10 +1,38 @@
 import { FormEvent, ReactNode, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { Clapperboard, Film, Gauge, Library, ListVideo, LogOut, Menu, Play, Search, Shield, Terminal, Ticket, Users } from 'lucide-react'
+import { Clapperboard, Film, Gauge, Layers3, Library, ListVideo, LogOut, Menu, Play, Search, Shield, Sparkles, Terminal, Ticket, Tv, Users } from 'lucide-react'
 import { PlexControlCenter } from './PlexControlCenter'
 
 type User = { id:number; discord_id:string; username:string; global_name?:string; avatar?:string; role:'SuperAdmin'|'Admin'|'Support'|'Member'; status:string }
-type Movie = { id:number; title:string; year?:number; poster_url?:string; backdrop_url?:string; genres:string[]; qualities:string[]; summary?:string; duration_ms?:number; rating?:string; actors?:string[]; directors?:string[]; library?:{id:number;title:string;server_id?:number;server_name?:string}; media?:Array<Record<string,unknown>> }
+type MediaItem = {
+  id:number
+  media_type:'movie'|'show'|'season'|'episode'
+  title:string
+  year?:number
+  poster_url?:string
+  backdrop_url?:string
+  genres:string[]
+  qualities:string[]
+  summary?:string
+  duration_ms?:number
+  rating?:string
+  actors?:string[]
+  directors?:string[]
+  playable?:boolean
+  is_anime?:boolean
+  season_number?:number
+  episode_number?:number
+  parent_title?:string
+  grandparent_title?:string
+  season_count?:number
+  episode_count?:number
+  seasons?:MediaItem[]
+  episodes?:MediaItem[]
+  library?:{id:number;title:string;type?:string;server_id?:number;server_name?:string}
+  media?:Array<Record<string,unknown>>
+}
+
+type BrowseMode = 'all'|'movie'|'show'|'anime'
 
 function errorText(body:any, fallback:string):string {
   const detail=body?.detail??body
@@ -12,7 +40,8 @@ function errorText(body:any, fallback:string):string {
   if(detail?.message){
     const lines=[String(detail.message)]
     if(detail.error)lines.push(String(detail.error))
-    if(Array.isArray(detail.attempts))for(const attempt of detail.attempts)lines.push(`${attempt.url||'route'} -> ${attempt.error||'failed'}`)
+    if(Array.isArray(detail.attempts))for(const attempt of detail.attempts.slice(0,6))lines.push(`${attempt.url||'route'} -> ${attempt.error||'failed'}`)
+    if(Array.isArray(detail.attempts)&&detail.attempts.length>6)lines.push(`+ ${detail.attempts.length-6} more route attempts`)
     return lines.join('\n')
   }
   try{return JSON.stringify(detail)}catch{return fallback}
@@ -49,20 +78,32 @@ function Shell({user,children}:{user:User;children:ReactNode}) {
 }
 
 function Browse() {
-  const [movies,setMovies]=useState<Movie[]>([]); const [loading,setLoading]=useState(true); const [q,setQ]=useState('')
-  useEffect(()=>{const timer=setTimeout(()=>{setLoading(true);api<{items:Movie[]}>(`/api/movies?q=${encodeURIComponent(q)}`).then(r=>setMovies(r.items)).finally(()=>setLoading(false))},250);return()=>clearTimeout(timer)},[q])
-  return <div className="page"><div className="hero command-hero browse-hero"><div><div className="terminal-kicker"><Terminal size={14}/> /MEDIA/INDEX</div><h1>{q?'SEARCH RESULT SET':'TONIGHT\'S LIBRARY'}</h1><p className="muted" style={{maxWidth:680}}>Browse indexed media across every enabled Plex node. Credentials never enter the browser; playback routes are temporary and server-side.</p><div className="search-terminal"><span>&gt;</span><input className="input" value={q} onChange={e=>setQ(e.target.value)} placeholder="query title / actor / director / genre / collection"/></div></div></div><div className="section-head terminal-section-head"><div><h2>{q?'QUERY_OUTPUT':'RECENTLY_ADDED'}</h2><div className="muted tiny-code">{movies.length} INDEXED TITLES</div></div></div>{loading?<div className="poster-grid">{Array.from({length:12}).map((_,i)=><div className="poster skeleton" key={i}/>)}</div>:<PosterGrid movies={movies}/>}</div>
+  const [items,setItems]=useState<MediaItem[]>([]); const [loading,setLoading]=useState(true); const [q,setQ]=useState(''); const [mode,setMode]=useState<BrowseMode>('all')
+  useEffect(()=>{const timer=setTimeout(()=>{setLoading(true);const params=new URLSearchParams();if(q)params.set('q',q);if(mode==='movie'||mode==='show')params.set('media_type',mode);if(mode==='anime')params.set('anime','true');api<{items:MediaItem[]}>(`/api/movies?${params}`).then(r=>setItems(r.items)).finally(()=>setLoading(false))},250);return()=>clearTimeout(timer)},[q,mode])
+  const filters:[BrowseMode,string,ReactNode][]=[['all','ALL MEDIA',<Layers3 size={14}/>],['movie','MOVIES',<Film size={14}/>],['show','TV / SERIES',<Tv size={14}/>],['anime','ANIME',<Sparkles size={14}/>]]
+  return <div className="page"><div className="hero command-hero browse-hero"><div><div className="terminal-kicker"><Terminal size={14}/> /MEDIA/INDEX</div><h1>{q?'SEARCH RESULT SET':'MEDIA NETWORK'}</h1><p className="muted" style={{maxWidth:680}}>Movies, TV series, anime, seasons and episodes indexed across every enabled Plex node.</p><div className="search-terminal"><span>&gt;</span><input className="input" value={q} onChange={e=>setQ(e.target.value)} placeholder="query title / actor / director / genre / library"/></div><div className="media-filters">{filters.map(([value,label,icon])=><button key={value} className={`media-filter ${mode===value?'active':''}`} onClick={()=>setMode(value)}>{icon}{label}</button>)}</div></div></div><div className="section-head terminal-section-head"><div><h2>{q?'QUERY_OUTPUT':'RECENTLY_ADDED'}</h2><div className="muted tiny-code">{items.length} INDEXED TITLES // {mode.toUpperCase()}</div></div></div>{loading?<div className="poster-grid">{Array.from({length:12}).map((_,i)=><div className="poster skeleton" key={i}/>)}</div>:<PosterGrid items={items}/>}</div>
 }
 
-function PosterGrid({movies}:{movies:Movie[]}) { return <div className="poster-grid">{movies.map(movie=><NavLink className="poster-card" to={`/movie/${movie.id}`} key={movie.id}><div className="poster">{movie.poster_url?<img src={movie.poster_url} alt=""/>:<div className="poster-empty"><Clapperboard/><span>{movie.title}</span></div>}<div className="poster-scanline"/></div><div className="poster-title">{movie.title}</div><div className="poster-meta">{movie.year||'----'} {movie.qualities?.length?` // ${movie.qualities.join(' / ')}`:''}</div>{movie.library?.server_name&&<div className="tiny-code">NODE:{movie.library.server_name}</div>}</NavLink>)}</div> }
+function MediaTypeBadge({item}:{item:MediaItem}) {
+  const label=item.is_anime?'ANIME':item.media_type==='show'?'SERIES':item.media_type==='movie'?'MOVIE':item.media_type.toUpperCase()
+  return <span className={`poster-type ${item.is_anime?'anime':''}`}>{label}</span>
+}
 
-function MovieDetail() {
-  const {id}=useParams(); const [movie,setMovie]=useState<Movie|null>(null); const [play,setPlay]=useState<any>(null); const [error,setError]=useState('')
-  useEffect(()=>{api<Movie>(`/api/movies/${id}`).then(setMovie).catch(e=>setError(e.message))},[id])
+function PosterGrid({items}:{items:MediaItem[]}) { return <div className="poster-grid">{items.map(item=><NavLink className="poster-card" to={`/media/${item.id}`} key={item.id}><div className="poster">{item.poster_url?<img src={item.poster_url} alt=""/>:<div className="poster-empty"><Clapperboard/><span>{item.title}</span></div>}<MediaTypeBadge item={item}/><div className="poster-scanline"/></div><div className="poster-title crt-title" data-text={item.title}>{item.title}</div><div className="poster-meta">{item.year||'----'} {item.media_type==='show'&&item.episode_count?` // ${item.episode_count} EPS`:item.qualities?.length?` // ${item.qualities.join(' / ')}`:''}</div>{item.library?.server_name&&<div className="tiny-code">NODE:{item.library.server_name} // LIB:{item.library.title}</div>}</NavLink>)}</div> }
+
+function EpisodeRow({episode}:{episode:MediaItem}) {
+  const duration=episode.duration_ms?Math.round(episode.duration_ms/60000):null
+  return <NavLink className="episode-row" to={`/media/${episode.id}`}><div className="episode-code">S{String(episode.season_number??0).padStart(2,'0')}E{String(episode.episode_number??0).padStart(2,'0')}</div><div className="episode-info"><strong>{episode.title}</strong><span>{episode.summary||'No episode summary supplied by Plex.'}</span></div><div className="episode-meta">{duration?`${duration} MIN`:''}{episode.qualities?.length?<small>{episode.qualities.join(' / ')}</small>:null}</div><Play size={17}/></NavLink>
+}
+
+function MediaDetail() {
+  const {id}=useParams(); const [item,setItem]=useState<MediaItem|null>(null); const [play,setPlay]=useState<any>(null); const [error,setError]=useState('')
+  useEffect(()=>{setItem(null);setPlay(null);setError('');api<MediaItem>(`/api/movies/${id}`).then(setItem).catch(e=>setError(e.message))},[id])
   async function createPlayback(){try{setPlay(await api(`/api/playback/movies/${id}`,{method:'POST'}))}catch(e:any){setError(e.message)}}
-  if(error&&!movie)return <div className="page"><pre className="terminal-alert bad">{error}</pre></div>; if(!movie)return <div className="page"><div className="skeleton" style={{height:500}}/></div>
-  const hours=movie.duration_ms?Math.floor(movie.duration_ms/3600000):0, mins=movie.duration_ms?Math.round((movie.duration_ms%3600000)/60000):0
-  return <div className="detail" style={movie.backdrop_url?{backgroundImage:`url(${movie.backdrop_url})`}:{}}><div className="detail-content"><div className="terminal-kicker"><Terminal size={14}/> /MEDIA/{movie.id} {movie.library?.server_name?`// NODE:${movie.library.server_name.toUpperCase()}`:''}</div><div className="chip-row"><span className="micro-badge">{movie.year}</span>{movie.rating&&<span className="micro-badge">RATING {movie.rating}</span>}{movie.qualities?.map(q=><span className="micro-badge" key={q}>{q}</span>)}</div><h1>{movie.title}</h1><p className="muted movie-summary">{movie.summary}</p><p className="tiny-code">RUNTIME:{hours?`${hours}H_`:''}{mins}M {movie.genres?.length?` // TAGS:${movie.genres.join(',').toUpperCase()}`:''}</p><div className="console-actions"><button className="btn primary" onClick={createPlayback}><Play size={16}/>GENERATE PLAYBACK ROUTE</button></div>{error&&<pre className="terminal-alert bad">{error}</pre>}{play&&<div className="terminal-panel playback-panel"><div className="terminal-panel-head"><div><span>URL</span> TEMPORARY MEDIA ROUTE</div><div className="live-dot ok">ACTIVE</div></div><div className="terminal-body"><div className="label">EXPIRES {new Date(play.expires_at).toLocaleString()}</div><input className="input" readOnly value={play.playback_url} onFocus={e=>e.currentTarget.select()}/><div className="console-actions"><button className="btn" onClick={()=>navigator.clipboard.writeText(play.playback_url)}>COPY URL</button><a className="btn" href={play.playback_url}>OPEN STREAM</a></div></div></div>}</div></div>
+  if(error&&!item)return <div className="page"><pre className="terminal-alert bad">{error}</pre></div>; if(!item)return <div className="page"><div className="skeleton" style={{height:500}}/></div>
+  const hours=item.duration_ms?Math.floor(item.duration_ms/3600000):0, mins=item.duration_ms?Math.round((item.duration_ms%3600000)/60000):0
+  const typeLabel=item.is_anime?'ANIME':item.media_type.toUpperCase()
+  return <div className="detail" style={item.backdrop_url?{backgroundImage:`url(${item.backdrop_url})`}:{}}><div className="detail-content"><div className="terminal-kicker"><Terminal size={14}/> /MEDIA/{item.id} // {typeLabel} {item.library?.server_name?`// NODE:${item.library.server_name.toUpperCase()}`:''}</div><div className="chip-row"><span className="micro-badge">{typeLabel}</span>{item.year&&<span className="micro-badge">{item.year}</span>}{item.rating&&<span className="micro-badge">RATING {item.rating}</span>}{item.season_number!=null&&<span className="micro-badge">SEASON {item.season_number}</span>}{item.episode_number!=null&&<span className="micro-badge">EPISODE {item.episode_number}</span>}{item.qualities?.map(q=><span className="micro-badge" key={q}>{q}</span>)}</div>{item.grandparent_title&&<div className="tiny-code detail-parent">SERIES::{item.grandparent_title} // {item.parent_title||''}</div>}<h1>{item.title}</h1><p className="muted movie-summary">{item.summary}</p>{item.duration_ms&&<p className="tiny-code">RUNTIME:{hours?`${hours}H_`:''}{mins}M {item.genres?.length?` // TAGS:${item.genres.join(',').toUpperCase()}`:''}</p>}{item.playable&&<div className="console-actions"><button className="btn primary" onClick={createPlayback}><Play size={16}/>GENERATE PLAYBACK ROUTE</button></div>}{item.media_type==='show'&&<div className="series-index"><div className="section-head terminal-section-head"><div><h2>SEASON_INDEX</h2><div className="muted tiny-code">{item.season_count||0} SEASONS // {item.episode_count||0} EPISODES</div></div></div>{item.seasons?.map(season=><section className="season-block terminal-panel" key={season.id}><div className="terminal-panel-head"><div><span>S{String(season.season_number??0).padStart(2,'0')}</span> {season.title.toUpperCase()}</div><div className="live-dot">{season.episodes?.length||0} EPS</div></div><div className="episode-list">{season.episodes?.map(ep=><EpisodeRow episode={ep} key={ep.id}/>)}</div></section>)}</div>}{item.media_type==='season'&&<div className="series-index"><div className="section-head terminal-section-head"><h2>EPISODE_INDEX</h2></div><div className="episode-list terminal-panel">{item.episodes?.map(ep=><EpisodeRow episode={ep} key={ep.id}/>)}</div></div>}{error&&<pre className="terminal-alert bad">{error}</pre>}{play&&<div className="terminal-panel playback-panel"><div className="terminal-panel-head"><div><span>URL</span> TEMPORARY MEDIA ROUTE</div><div className="live-dot ok">ACTIVE</div></div><div className="terminal-body"><div className="label">EXPIRES {new Date(play.expires_at).toLocaleString()}</div><input className="input" readOnly value={play.playback_url} onFocus={e=>e.currentTarget.select()}/><div className="console-actions"><button className="btn" onClick={()=>navigator.clipboard.writeText(play.playback_url)}>COPY URL</button><a className="btn" href={play.playback_url}>OPEN STREAM</a></div></div></div>}</div></div>
 }
 
 function AdminDashboard() {
@@ -94,7 +135,7 @@ function ProtectedApp() {
  const [user,setUser]=useState<User|null|undefined>(undefined)
  useEffect(()=>{api<User>('/api/auth/me').then(setUser).catch(()=>setUser(null))},[])
  if(user===undefined)return <div className="page"><div className="skeleton" style={{height:400}}/></div>; if(user===null)return <Navigate to="/login" replace/>
- return <Shell user={user}><Routes><Route path="/browse" element={<Browse/>}/><Route path="/search" element={<Browse/>}/><Route path="/collections" element={<Browse/>}/><Route path="/movie/:id" element={<MovieDetail/>}/><Route path="/admin" element={<AdminDashboard/>}/><Route path="/admin/invites" element={<InviteAdmin user={user}/>}/><Route path="/admin/users" element={<UsersAdmin/>}/><Route path="/admin/plex" element={<PlexControlCenter user={user}/>}/><Route path="/admin/logs" element={<Logs/>}/><Route path="*" element={<Navigate to="/browse" replace/>}/></Routes></Shell>
+ return <Shell user={user}><Routes><Route path="/browse" element={<Browse/>}/><Route path="/search" element={<Browse/>}/><Route path="/collections" element={<Browse/>}/><Route path="/media/:id" element={<MediaDetail/>}/><Route path="/movie/:id" element={<MediaDetail/>}/><Route path="/admin" element={<AdminDashboard/>}/><Route path="/admin/invites" element={<InviteAdmin user={user}/>}/><Route path="/admin/users" element={<UsersAdmin/>}/><Route path="/admin/plex" element={<PlexControlCenter user={user}/>}/><Route path="/admin/logs" element={<Logs/>}/><Route path="*" element={<Navigate to="/browse" replace/>}/></Routes></Shell>
 }
 
 export default function App(){return <Routes><Route path="/login" element={<Login/>}/><Route path="/invite/:token" element={<InvitePage/>}/><Route path="/*" element={<ProtectedApp/>}/></Routes>}
