@@ -80,6 +80,13 @@ def _rewrite_playlist(
     return "\n".join(output) + "\n"
 
 
+def _movie_plex(db: Session, movie: Movie) -> PlexService:
+    plex = PlexService.for_movie(db, movie)
+    if not plex.base_url or not plex.token:
+        raise HTTPException(503, "The Plex server for this movie is not configured")
+    return plex
+
+
 @router.post("/api/playback/movies/{movie_id}")
 def create_playback(
     movie_id: int,
@@ -90,6 +97,11 @@ def create_playback(
     movie = db.get(Movie, movie_id)
     if not movie:
         raise HTTPException(404, "Movie not found")
+
+    plex = _movie_plex(db, movie)
+    connection = plex.connect()
+    if not connection.connected:
+        raise HTTPException(503, f"Movie Plex server is unreachable: {connection.error or 'connection failed'}")
 
     playback_service = PlaybackService(db)
     token, raw = playback_service.create_token(
@@ -132,7 +144,10 @@ def create_playback(
             target_id=str(movie.id),
             ip=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
-            event_metadata={"playback_mode": media_info["playback_mode"]},
+            event_metadata={
+                "playback_mode": media_info["playback_mode"],
+                "plex_server_id": plex.server_id,
+            },
         )
     )
     db.commit()
@@ -140,15 +155,14 @@ def create_playback(
         "playback_url": playback_url,
         "expires_at": token.expires_at,
         "media": media_info,
+        "plex_server_id": plex.server_id,
     }
 
 
 @router.get("/stream/{raw_token}")
 def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> StreamingResponse:
-    _token, _user, _movie, media = _active_playback(raw_token, db)
-    plex = PlexService.from_db(db)
-    if not plex.base_url or not plex.token:
-        raise HTTPException(503, "Plex is not configured")
+    _token, _user, movie, media = _active_playback(raw_token, db)
+    plex = _movie_plex(db, movie)
     upstream_url = plex.stream_url(media.part_key)
     headers = _plex_media_headers(plex)
     range_header = request.headers.get("range")
@@ -212,7 +226,7 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
         "2160p": "3840x2160",
     }
     resolution = resolution_map.get(str(prefs["preferred_resolution"]).lower(), "1920x1080")
-    plex = PlexService.from_db(db)
+    plex = _movie_plex(db, movie)
     upstream_url = plex.get_transcode_url(
         movie.rating_key,
         max_video_bitrate=int(prefs["max_stream_bitrate_kbps"]),
@@ -249,8 +263,8 @@ def transcode_resource(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    _active_playback(raw_token, db)
-    plex = PlexService.from_db(db)
+    _token, _user, movie, _media = _active_playback(raw_token, db)
+    plex = _movie_plex(db, movie)
     try:
         upstream_url = decrypt_secret(opaque)
     except RuntimeError as exc:
