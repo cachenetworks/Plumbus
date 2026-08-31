@@ -1,7 +1,12 @@
 from urllib.parse import parse_qs, urlparse
 
 from app.api.playback import _delivery_for_target
-from app.api.playback_web import _build_browser_transcode_url, _rewrite_browser_playlist
+from app.api.playback_web import (
+    _build_browser_audio_url,
+    _build_browser_transcode_url,
+    _needs_audio_compat,
+    _rewrite_browser_playlist,
+)
 from app.models.models import MovieMedia
 from app.services.playback.service import PlaybackService
 from app.services.plex.service import PlexService
@@ -26,6 +31,42 @@ def test_browser_transcode_forces_h264_aac_profile():
     assert "container=mpegts" in profile
     assert "videoCodec=h264" in profile
     assert "audioCodec=aac" in profile
+
+
+def test_browser_audio_fix_prefers_video_copy_and_aac_audio():
+    plex = PlexService("http://plex:32400", "secret-token")
+    media = MovieMedia(
+        container="mkv",
+        video_codec="h264",
+        audio_codec="eac3",
+        bitrate=18000,
+    )
+    url = _build_browser_audio_url(plex, "12345", media)
+    query = parse_qs(urlparse(url).query)
+
+    assert query["protocol"] == ["hls"]
+    assert query["directPlay"] == ["0"]
+    assert query["directStream"] == ["1"]
+    assert query["directStreamAudio"] == ["0"]
+    assert int(query["maxVideoBitrate"][0]) > media.bitrate
+    profile = query["X-Plex-Client-Profile-Extra"][0]
+    assert "videoCodec=h264,hevc" in profile
+    assert "audioCodec=aac" in profile
+
+
+def test_silent_browser_audio_codecs_trigger_audio_fix():
+    base = {
+        "direct_play_candidate": True,
+        "allow_plex_transcoding": True,
+    }
+    assert _needs_audio_compat({**base, "audio_codec": "ac3"}) is True
+    assert _needs_audio_compat({**base, "audio_codec": "eac3"}) is True
+    assert _needs_audio_compat({**base, "audio_codec": "dts"}) is True
+    assert _needs_audio_compat({**base, "audio_codec": "truehd"}) is True
+    assert _needs_audio_compat({**base, "audio_codec": "aac"}) is False
+    assert _needs_audio_compat({**base, "audio_codec": "mp3"}) is False
+    assert _needs_audio_compat({**base, "audio_codec": ""}) is False
+    assert _needs_audio_compat({**base, "audio_codec": "ac3", "allow_plex_transcoding": False}) is False
 
 
 def test_browser_hls_playlist_uses_same_origin_proxy_paths():
