@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, auth, health, history, invites, movies, playback, playback_admin, plex, settings as settings_api, setup, users, webhooks
+from app.api import audit, auth, entry, health, history, invites, movies, playback, playback_admin, plex, settings as settings_api, setup, users, webhooks
 from app.core.config import settings
 from app.security.middleware import SecurityGateMiddleware
 
@@ -35,6 +35,7 @@ async def security_headers(request: Request, call_next):
 
 for router in (
     health.router,
+    entry.router,
     setup.router,
     auth.router,
     invites.router,
