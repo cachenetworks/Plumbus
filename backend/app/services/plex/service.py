@@ -96,7 +96,14 @@ class PlexService:
         message = f"{type(exc).__name__}: {exc}"
         if self.token:
             message = message.replace(self.token, "[redacted]")
-        return message[:1000]
+        lower = message.lower()
+        html_index = lower.find("<html")
+        if html_index >= 0:
+            message = message[:html_index]
+        message = " ".join(message.split()).rstrip(" :-")
+        if "401" in message and "unauthorized" in message.lower():
+            return f"Plex rejected the server token with HTTP 401 Unauthorized ({self.base_url})"
+        return message[:500]
 
     def connect(self) -> PlexConnectionInfo:
         if settings.MOCK_PLEX:
