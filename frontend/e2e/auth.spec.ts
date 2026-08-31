@@ -28,3 +28,18 @@ test('invite route validates token before presenting Discord registration', asyn
     '/api/auth/discord/register/secure-test-token',
   )
 })
+
+test('first-run setup renders the claim wizard', async ({ page }) => {
+  await page.route('**/api/setup/status', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ completed: false, claimed: false }),
+    })
+  })
+
+  await page.goto('/setup')
+  await expect(page.getByRole('heading', { name: 'CLAIM THIS INSTALL' })).toBeVisible()
+  await expect(page.getByPlaceholder('XXXXXXXXXX')).toBeVisible()
+  await expect(page.getByRole('button', { name: /claim installation/i })).toBeVisible()
+})
