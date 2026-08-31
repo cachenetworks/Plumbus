@@ -94,7 +94,18 @@ export function WatchPage(){
     video.removeAttribute('src');video.load()
 
     if(playback.delivery==='hls'&&Hls.isSupported()){
-      const hls=new Hls({enableWorker:true,lowLatencyMode:false,backBufferLength:90})
+      const hls=new Hls({
+        enableWorker:true,
+        lowLatencyMode:false,
+        backBufferLength:60,
+        maxBufferLength:60,
+        maxMaxBufferLength:180,
+        maxBufferHole:.75,
+        startFragPrefetch:true,
+        fragLoadingMaxRetry:6,
+        manifestLoadingMaxRetry:4,
+        levelLoadingMaxRetry:4,
+      })
       hlsRef.current=hls
       hls.loadSource(playback.playback_url)
       hls.attachMedia(video)
@@ -205,7 +216,7 @@ export function WatchPage(){
       onPlay={()=>{setPlaying(true);showControls()}}
       onPause={()=>{setPlaying(false);setControlsVisible(true);void saveProgress(true)}}
       onEnded={()=>{setPlaying(false);void jsonApi('/api/history/complete',{method:'POST',body:JSON.stringify({movie_id:id,position_ms:Math.floor((videoRef.current?.duration||0)*1000)})}).catch(()=>{});if(navigation.next)setTimeout(()=>switchEpisode(navigation.next),1200)}}
-      onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}}
+      onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}
       onError={()=>setError('The browser could not decode this stream. Try enabling Plex transcoding or use the VRChat link mode.')}
     />
     {item?.backdrop_url&&!playing&&<div className="watch-backdrop" style={{backgroundImage:`url(${item.backdrop_url})`}}/>}
