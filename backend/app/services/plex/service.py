@@ -121,6 +121,7 @@ class PlexService:
             libraries = [
                 {"key": str(section.key), "title": section.title, "type": section.type}
                 for section in server.library.sections()
+                if section.type in {"movie", "show"}
             ]
             return PlexConnectionInfo(
                 connected=True,
@@ -136,26 +137,204 @@ class PlexService:
         if settings.MOCK_PLEX:
             return [
                 {"key": "1", "title": "Movies", "type": "movie"},
-                {"key": "2", "title": "4K Movies", "type": "movie"},
+                {"key": "2", "title": "Anime", "type": "show"},
             ]
         return self.connect().libraries or []
 
-    def iter_movies(self, library_key: str) -> list[dict[str, Any]]:
-        if settings.MOCK_PLEX:
-            samples = [
-                ("1001", "Interstellar", 2014, "1080", "h264"),
-                ("1002", "The Matrix", 1999, "1080", "h264"),
-                ("1003", "Blade Runner 2049", 2017, "2160", "hevc"),
-                ("1004", "Dune", 2021, "2160", "hevc"),
-                ("1005", "The Dark Knight", 2008, "1080", "h264"),
-            ]
-            return [
+    @staticmethod
+    def _media_rows(item: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for media in getattr(item, "media", []) or []:
+            for part in getattr(media, "parts", []) or []:
+                dynamic_range = getattr(media, "videoDynamicRange", None)
+                rows.append(
+                    {
+                        "plex_media_id": str(getattr(media, "id", "")) or None,
+                        "part_key": getattr(part, "key", None),
+                        "file_path": getattr(part, "file", None),
+                        "container": getattr(media, "container", None),
+                        "video_codec": getattr(media, "videoCodec", None),
+                        "audio_codec": getattr(media, "audioCodec", None),
+                        "width": getattr(media, "width", None),
+                        "height": getattr(media, "height", None),
+                        "resolution": getattr(media, "videoResolution", None),
+                        "bitrate": getattr(media, "bitrate", None),
+                        "hdr": str(dynamic_range) if dynamic_range else None,
+                        "audio_channels": getattr(media, "audioChannels", None),
+                        "file_size": getattr(part, "size", None),
+                    }
+                )
+        return rows
+
+    @classmethod
+    def _payload(
+        cls,
+        item: Any,
+        media_type: str,
+        *,
+        parent_rating_key: str | None = None,
+        grandparent_rating_key: str | None = None,
+        parent_title: str | None = None,
+        grandparent_title: str | None = None,
+        season_number: int | None = None,
+        episode_number: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "rating_key": str(item.ratingKey),
+            "media_type": media_type,
+            "parent_rating_key": parent_rating_key,
+            "grandparent_rating_key": grandparent_rating_key,
+            "parent_title": parent_title,
+            "grandparent_title": grandparent_title,
+            "season_number": season_number,
+            "episode_number": episode_number,
+            "title": item.title,
+            "original_title": getattr(item, "originalTitle", None),
+            "year": getattr(item, "year", None),
+            "summary": getattr(item, "summary", None),
+            "tagline": getattr(item, "tagline", None),
+            "content_rating": getattr(item, "contentRating", None),
+            "duration_ms": getattr(item, "duration", None),
+            "studio": getattr(item, "studio", None),
+            "rating": str(getattr(item, "rating", "") or "") or None,
+            "audience_rating": str(getattr(item, "audienceRating", "") or "") or None,
+            "edition_title": getattr(item, "editionTitle", None),
+            "genres": [x.tag for x in getattr(item, "genres", []) or []],
+            "directors": [x.tag for x in getattr(item, "directors", []) or []],
+            "actors": [x.tag for x in getattr(item, "roles", []) or []],
+            "writers": [x.tag for x in getattr(item, "writers", []) or []],
+            "collections": [x.tag for x in getattr(item, "collections", []) or []],
+            "labels": [x.tag for x in getattr(item, "labels", []) or []],
+            "poster_key": getattr(item, "thumb", None),
+            "art_key": getattr(item, "art", None),
+            "added_at": getattr(item, "addedAt", None),
+            "updated_at": getattr(item, "updatedAt", None),
+            "media": cls._media_rows(item),
+        }
+
+    @staticmethod
+    def _mock_movie_rows() -> list[dict[str, Any]]:
+        samples = [
+            ("1001", "Interstellar", 2014, "1080", "h264"),
+            ("1002", "The Matrix", 1999, "1080", "h264"),
+            ("1003", "Blade Runner 2049", 2017, "2160", "hevc"),
+            ("1004", "Dune", 2021, "2160", "hevc"),
+            ("1005", "The Dark Knight", 2008, "1080", "h264"),
+        ]
+        return [
+            {
+                "rating_key": key,
+                "media_type": "movie",
+                "parent_rating_key": None,
+                "grandparent_rating_key": None,
+                "parent_title": None,
+                "grandparent_title": None,
+                "season_number": None,
+                "episode_number": None,
+                "title": title,
+                "year": year,
+                "summary": f"Development fixture for {title}.",
+                "genres": ["Drama", "Science Fiction"],
+                "directors": [],
+                "actors": [],
+                "writers": [],
+                "collections": [],
+                "labels": [],
+                "poster_key": None,
+                "art_key": None,
+                "added_at": None,
+                "updated_at": None,
+                "media": [
+                    {
+                        "plex_media_id": f"m-{key}",
+                        "part_key": f"/library/parts/{key}/file.mp4",
+                        "file_path": None,
+                        "container": "mp4",
+                        "video_codec": codec,
+                        "audio_codec": "aac",
+                        "width": 3840 if resolution == "2160" else 1920,
+                        "height": 2160 if resolution == "2160" else 1080,
+                        "resolution": f"{resolution}p" if resolution != "2160" else "4K",
+                        "bitrate": 12000,
+                        "hdr": "HDR10" if resolution == "2160" else None,
+                        "audio_channels": 6,
+                        "file_size": None,
+                    }
+                ],
+            }
+            for key, title, year, resolution, codec in samples
+        ]
+
+    @staticmethod
+    def _mock_show_rows() -> list[dict[str, Any]]:
+        show_key = "2000"
+        season_key = "2001"
+        rows: list[dict[str, Any]] = [
+            {
+                "rating_key": show_key,
+                "media_type": "show",
+                "parent_rating_key": None,
+                "grandparent_rating_key": None,
+                "parent_title": None,
+                "grandparent_title": None,
+                "season_number": None,
+                "episode_number": None,
+                "title": "Neon Ronin",
+                "year": 2026,
+                "summary": "Mock anime series.",
+                "genres": ["Anime", "Action"],
+                "directors": [],
+                "actors": [],
+                "writers": [],
+                "collections": [],
+                "labels": [],
+                "poster_key": None,
+                "art_key": None,
+                "added_at": None,
+                "updated_at": None,
+                "media": [],
+            },
+            {
+                "rating_key": season_key,
+                "media_type": "season",
+                "parent_rating_key": show_key,
+                "grandparent_rating_key": None,
+                "parent_title": "Neon Ronin",
+                "grandparent_title": None,
+                "season_number": 1,
+                "episode_number": None,
+                "title": "Season 1",
+                "year": 2026,
+                "summary": None,
+                "genres": [],
+                "directors": [],
+                "actors": [],
+                "writers": [],
+                "collections": [],
+                "labels": [],
+                "poster_key": None,
+                "art_key": None,
+                "added_at": None,
+                "updated_at": None,
+                "media": [],
+            },
+        ]
+        for episode in range(1, 4):
+            key = f"20{episode + 1:02d}"
+            rows.append(
                 {
                     "rating_key": key,
-                    "title": title,
-                    "year": year,
-                    "summary": f"Development fixture for {title}.",
-                    "genres": ["Drama", "Science Fiction"],
+                    "media_type": "episode",
+                    "parent_rating_key": season_key,
+                    "grandparent_rating_key": show_key,
+                    "parent_title": "Season 1",
+                    "grandparent_title": "Neon Ronin",
+                    "season_number": 1,
+                    "episode_number": episode,
+                    "title": f"Episode {episode}",
+                    "year": 2026,
+                    "summary": f"Mock anime episode {episode}.",
+                    "genres": ["Anime"],
                     "directors": [],
                     "actors": [],
                     "writers": [],
@@ -168,79 +347,74 @@ class PlexService:
                     "media": [
                         {
                             "plex_media_id": f"m-{key}",
-                            "part_key": f"/library/parts/{key}/file.mp4",
+                            "part_key": f"/library/parts/{key}/episode.mp4",
                             "file_path": None,
                             "container": "mp4",
-                            "video_codec": codec,
+                            "video_codec": "h264",
                             "audio_codec": "aac",
-                            "width": 3840 if resolution == "2160" else 1920,
-                            "height": 2160 if resolution == "2160" else 1080,
-                            "resolution": f"{resolution}p" if resolution != "2160" else "4K",
-                            "bitrate": 12000,
-                            "hdr": "HDR10" if resolution == "2160" else None,
-                            "audio_channels": 6,
+                            "width": 1920,
+                            "height": 1080,
+                            "resolution": "1080p",
+                            "bitrate": 8000,
+                            "hdr": None,
+                            "audio_channels": 2,
                             "file_size": None,
                         }
                     ],
                 }
-                for key, title, year, resolution, codec in samples
-            ]
+            )
+        return rows
+
+    def iter_items(self, library_key: str, library_type: str | None = None) -> list[dict[str, Any]]:
+        if settings.MOCK_PLEX:
+            return self._mock_show_rows() if library_type == "show" else self._mock_movie_rows()
 
         server = PlexApiServer(self.base_url, self.token, timeout=30)
         section = server.library.sectionByID(int(library_key))
-        movies: list[dict[str, Any]] = []
+        effective_type = library_type or getattr(section, "type", None)
+        rows: list[dict[str, Any]] = []
+
         for item in section.all():
-            if getattr(item, "TYPE", None) != "movie" and getattr(item, "type", None) != "movie":
+            item_type = str(getattr(item, "TYPE", None) or getattr(item, "type", None) or effective_type or "")
+            if item_type == "movie":
+                rows.append(self._payload(item, "movie"))
                 continue
-            media_rows: list[dict[str, Any]] = []
-            for media in getattr(item, "media", []) or []:
-                for part in getattr(media, "parts", []) or []:
-                    hdr = str(media.videoDynamicRange) if getattr(media, "videoDynamicRange", None) else None
-                    media_rows.append(
-                        {
-                            "plex_media_id": str(getattr(media, "id", "")) or None,
-                            "part_key": getattr(part, "key", None),
-                            "file_path": getattr(part, "file", None),
-                            "container": getattr(media, "container", None),
-                            "video_codec": getattr(media, "videoCodec", None),
-                            "audio_codec": getattr(media, "audioCodec", None),
-                            "width": getattr(media, "width", None),
-                            "height": getattr(media, "height", None),
-                            "resolution": getattr(media, "videoResolution", None),
-                            "bitrate": getattr(media, "bitrate", None),
-                            "hdr": hdr,
-                            "audio_channels": getattr(media, "audioChannels", None),
-                            "file_size": getattr(part, "size", None),
-                        }
+            if item_type != "show":
+                continue
+
+            show_key = str(item.ratingKey)
+            show_title = item.title
+            rows.append(self._payload(item, "show"))
+            for season in item.seasons():
+                season_key = str(season.ratingKey)
+                season_number = getattr(season, "index", None)
+                rows.append(
+                    self._payload(
+                        season,
+                        "season",
+                        parent_rating_key=show_key,
+                        parent_title=show_title,
+                        season_number=season_number,
                     )
-            movies.append(
-                {
-                    "rating_key": str(item.ratingKey),
-                    "title": item.title,
-                    "original_title": getattr(item, "originalTitle", None),
-                    "year": getattr(item, "year", None),
-                    "summary": getattr(item, "summary", None),
-                    "tagline": getattr(item, "tagline", None),
-                    "content_rating": getattr(item, "contentRating", None),
-                    "duration_ms": getattr(item, "duration", None),
-                    "studio": getattr(item, "studio", None),
-                    "rating": str(getattr(item, "rating", "") or "") or None,
-                    "audience_rating": str(getattr(item, "audienceRating", "") or "") or None,
-                    "edition_title": getattr(item, "editionTitle", None),
-                    "genres": [x.tag for x in getattr(item, "genres", []) or []],
-                    "directors": [x.tag for x in getattr(item, "directors", []) or []],
-                    "actors": [x.tag for x in getattr(item, "roles", []) or []],
-                    "writers": [x.tag for x in getattr(item, "writers", []) or []],
-                    "collections": [x.tag for x in getattr(item, "collections", []) or []],
-                    "labels": [x.tag for x in getattr(item, "labels", []) or []],
-                    "poster_key": getattr(item, "thumb", None),
-                    "art_key": getattr(item, "art", None),
-                    "added_at": getattr(item, "addedAt", None),
-                    "updated_at": getattr(item, "updatedAt", None),
-                    "media": media_rows,
-                }
-            )
-        return movies
+                )
+                for episode in season.episodes():
+                    rows.append(
+                        self._payload(
+                            episode,
+                            "episode",
+                            parent_rating_key=season_key,
+                            grandparent_rating_key=show_key,
+                            parent_title=season.title,
+                            grandparent_title=show_title,
+                            season_number=getattr(episode, "parentIndex", None) or season_number,
+                            episode_number=getattr(episode, "index", None),
+                        )
+                    )
+        return rows
+
+    def iter_movies(self, library_key: str) -> list[dict[str, Any]]:
+        """Backward-compatible alias for existing integrations/tests."""
+        return self.iter_items(library_key, "movie")
 
     def artwork_response(self, plex_path: str) -> httpx.Response:
         return httpx.get(
