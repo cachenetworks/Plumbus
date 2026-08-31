@@ -25,14 +25,16 @@ from app.services.settings import ApplicationSettingsService
 router = APIRouter(tags=["browser-playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 
+# HLS consists of many short requests. Reusing a process-wide HTTP client keeps
+# TCP/TLS connections to PMS warm instead of reconnecting for every segment.
+PLEX_STREAM_CLIENT = httpx.Client(
+    timeout=None,
+    follow_redirects=True,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=32, keepalive_expiry=90),
+)
+
 
 def _browser_proxy_path(raw_token: str, upstream_url: str) -> str:
-    """Return a same-origin HLS resource path.
-
-    Relative paths intentionally avoid APP_URL/CORS/mixed-content failures in the
-    browser. They also remain valid inside an absolute VRChat HLS master URL,
-    because AVPro resolves relative playlist resources against the master URL.
-    """
     return f"/stream/{raw_token}/hls/{encrypt_secret(upstream_url)}"
 
 
@@ -51,17 +53,31 @@ def _rewrite_browser_playlist(text: str, base_url: str, raw_token: str) -> str:
     return "\n".join(output) + "\n"
 
 
+def _browser_bitrate(prefs: dict) -> int:
+    """Keep the web profile comfortably below the configured ceiling.
+
+    Plex/VRChat can still use the full configured bitrate. The browser profile is
+    intentionally conservative because it passes Plex -> Plumbus -> browser and
+    therefore benefits more from headroom than maximum source quality.
+    """
+    configured = int(prefs["max_stream_bitrate_kbps"])
+    preferred = str(prefs["preferred_resolution"]).lower()
+    ceiling = {
+        "720p": 4500,
+        "1080p": 8000,
+        "1440p": 10000,
+        "4k": 12000,
+        "2160p": 12000,
+    }.get(preferred, 8000)
+    return min(configured, ceiling)
+
+
 def _build_browser_transcode_url(
     plex: PlexService,
     rating_key: str,
     max_video_bitrate: int,
     video_resolution: str,
 ) -> str:
-    """Build a Plex HLS session that is deliberately browser-safe.
-
-    Do not let PMS direct-stream the original HEVC/DTS/EAC3/etc. tracks into an
-    HLS container. The web player asks Plex for H.264 video + AAC audio instead.
-    """
     session = uuid4().hex
     profile_extra = (
         "add-transcode-target(type=videoProfile&context=streaming&protocol=hls"
@@ -81,12 +97,12 @@ def _build_browser_transcode_url(
         "directStream": 0,
         "directStreamAudio": 0,
         "copyts": 1,
-        "videoQuality": 100,
+        "videoQuality": 80,
         "videoResolution": video_resolution,
         "maxVideoBitrate": max_video_bitrate,
         "audioBoost": 100,
         "subtitles": "none",
-        "mediaBufferSize": 102400,
+        "mediaBufferSize": 204800,
         "session": session,
         "X-Plex-Session-Identifier": session,
         "X-Plex-Client-Identifier": "plumbus-web",
@@ -119,10 +135,6 @@ def browser_playback(
     db: Session = Depends(get_db),
 ) -> dict:
     result = _build_playback(media_id, "browser", request, user, db)
-
-    # Browser playback must always use the current page origin. APP_URL is still
-    # used for externally shareable VRChat links, but it should never be able to
-    # break HLS inside the logged-in website.
     parsed = urlparse(result["playback_url"])
     relative = parsed.path
     if parsed.query:
@@ -134,26 +146,25 @@ def browser_playback(
 
 @router.get("/stream/{raw_token}/master.m3u8")
 def browser_transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
-    _token, _user, movie, media = _active_playback(raw_token, db)
-    media_info = ApplicationSettingsService(db).playback()
-    if not bool(media_info["allow_plex_transcoding"]):
+    _token, _user, movie, _media = _active_playback(raw_token, db)
+    prefs = ApplicationSettingsService(db).playback()
+    if not bool(prefs["allow_plex_transcoding"]):
         raise HTTPException(409, "Plex transcoding is disabled")
 
     plex = _movie_plex(db, movie)
     upstream_url = _build_browser_transcode_url(
         plex,
         movie.rating_key,
-        max_video_bitrate=int(media_info["max_stream_bitrate_kbps"]),
-        video_resolution=_resolution(media_info),
+        max_video_bitrate=_browser_bitrate(prefs),
+        video_resolution=_resolution(prefs),
     )
     _assert_plex_url(plex, upstream_url)
 
     try:
-        response = httpx.get(
+        response = PLEX_STREAM_CLIENT.get(
             upstream_url,
             headers=_plex_media_headers(plex),
             timeout=60,
-            follow_redirects=True,
         )
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Unable to start Plex web transcode: {type(exc).__name__}") from exc
@@ -172,6 +183,7 @@ def browser_transcode_master(raw_token: str, db: Session = Depends(get_db)) -> R
             "Cache-Control": "private, no-store",
             "X-Plumbus-Video-Codec": "h264",
             "X-Plumbus-Audio-Codec": "aac",
+            "X-Plumbus-Max-Bitrate-Kbps": str(_browser_bitrate(prefs)),
         },
     )
 
@@ -195,46 +207,48 @@ def browser_transcode_resource(
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
 
-    client = httpx.Client(timeout=None, follow_redirects=True)
-    upstream = client.send(client.build_request("GET", upstream_url, headers=headers), stream=True)
+    upstream = PLEX_STREAM_CLIENT.send(
+        PLEX_STREAM_CLIENT.build_request("GET", upstream_url, headers=headers),
+        stream=True,
+    )
     if upstream.status_code >= 400:
         status = upstream.status_code
         upstream.close()
-        client.close()
         raise HTTPException(502, f"Plex transcode resource returned HTTP {status}")
     _assert_plex_url(plex, str(upstream.url))
 
     content_type = upstream.headers.get("content-type", "application/octet-stream")
-    if "mpegurl" in content_type.lower() or str(upstream.url).lower().split("?", 1)[0].endswith(".m3u8"):
+    is_playlist = "mpegurl" in content_type.lower() or str(upstream.url).lower().split("?", 1)[0].endswith(".m3u8")
+    if is_playlist:
         try:
             data = b"".join(upstream.iter_bytes()).decode("utf-8")
         finally:
             upstream.close()
-            client.close()
         rewritten = _rewrite_browser_playlist(data, str(upstream.url), raw_token)
         return Response(
             rewritten,
             media_type="application/vnd.apple.mpegurl",
-            headers={"Cache-Control": "private, no-store"},
+            headers={"Cache-Control": "private, max-age=1"},
         )
 
-    response_headers = {"Cache-Control": "private, no-store"}
+    response_headers = {"Cache-Control": "private, max-age=3600"}
     for source, target in (
         ("content-length", "Content-Length"),
         ("content-range", "Content-Range"),
         ("accept-ranges", "Accept-Ranges"),
+        ("etag", "ETag"),
+        ("last-modified", "Last-Modified"),
     ):
         if source in upstream.headers:
             response_headers[target] = upstream.headers[source]
 
     def body() -> Iterator[bytes]:
         try:
-            for chunk in upstream.iter_bytes(chunk_size=1024 * 1024):
+            for chunk in upstream.iter_bytes(chunk_size=2 * 1024 * 1024):
                 if chunk:
                     yield chunk
         finally:
             upstream.close()
-            client.close()
 
     return StreamingResponse(
         body(),
