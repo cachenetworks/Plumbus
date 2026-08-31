@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.models import Movie, MovieMedia, MovieTag, PlexLibrary, PlexScanJob
 from app.services.plex.service import PlexService
+from app.services.plex.show_scan import iter_show_library
 
 
 class PlexScanner:
@@ -41,7 +42,11 @@ class PlexScanner:
 
         seen_rating_keys: set[str] = set()
         try:
-            rows = plex.iter_items(library.plex_key, library.library_type)
+            rows = (
+                iter_show_library(plex, library.plex_key)
+                if library.library_type == "show" and not target_movie
+                else plex.iter_items(library.plex_key, library.library_type)
+            )
             for payload in rows:
                 if target_movie and payload["rating_key"] != target_movie.rating_key:
                     continue
