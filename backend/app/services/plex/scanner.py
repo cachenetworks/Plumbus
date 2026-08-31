@@ -4,6 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.models import Movie, MovieMedia, MovieTag, PlexLibrary, PlexScanJob
+from app.services.plex.audio_tracks import BROWSER_COPY_AUDIO_CODECS, fetch_audio_tracks
 from app.services.plex.service import PlexService
 from app.services.plex.show_scan import iter_show_library
 
@@ -130,6 +131,32 @@ class PlexScanner:
                 media_item.added_at = payload.get("added_at")
                 media_item.plex_updated_at = payload.get("updated_at")
                 media_item.indexed_at = datetime.now(UTC)
+
+                # Keep a compact per-part audio track cache in the existing JSON
+                # metadata column. We only make the extra Plex metadata request
+                # when the top-level codec is not browser-safe, so normal scans
+                # do not double their request count.
+                metadata = dict(media_item.plex_metadata or {})
+                audio_track_map = dict(metadata.get("audio_tracks") or {})
+                for media in payload.get("media", []):
+                    part_key = media.get("part_key")
+                    audio_codec = str(media.get("audio_codec") or "").lower()
+                    if not part_key or audio_codec in BROWSER_COPY_AUDIO_CODECS:
+                        continue
+                    try:
+                        tracks = fetch_audio_tracks(
+                            plex,
+                            payload["rating_key"],
+                            part_key=part_key,
+                            plex_media_id=media.get("plex_media_id"),
+                        )
+                    except Exception:
+                        tracks = []
+                    if tracks:
+                        audio_track_map[part_key] = tracks
+                if audio_track_map:
+                    metadata["audio_tracks"] = audio_track_map
+                    media_item.plex_metadata = metadata
 
                 self.db.execute(delete(MovieMedia).where(MovieMedia.movie_id == media_item.id))
                 for media in payload.get("media", []):
