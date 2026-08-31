@@ -13,7 +13,7 @@ describe('authentication entrypoints', () => {
     )
 
     expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Continue with Discord' })).toHaveAttribute(
+    expect(screen.getByRole('link', { name: /continue with discord/i })).toHaveAttribute(
       'href',
       '/api/auth/discord/login',
     )
