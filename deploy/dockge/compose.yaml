@@ -1,0 +1,137 @@
+name: plumbus
+
+x-app-env: &app-env
+  APP_ENV: production
+  APP_URL: ${APP_URL:-http://localhost:8080}
+  DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-cinema}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cinema}
+  REDIS_URL: redis://redis:6379/0
+  SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in Dockge environment}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:?Set TOKEN_ENCRYPTION_KEY in Dockge environment}
+  COOKIE_SECURE: "true"
+  MOCK_PLEX: "false"
+  PLEX_SCAN_INTERVAL_MINUTES: ${PLEX_SCAN_INTERVAL_MINUTES:-30}
+  PLAYBACK_TOKEN_LIFETIME_MINUTES: ${PLAYBACK_TOKEN_LIFETIME_MINUTES:-360}
+  WEB_CONCURRENCY: ${WEB_CONCURRENCY:-4}
+  GUNICORN_TIMEOUT: ${GUNICORN_TIMEOUT:-120}
+  CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+  CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-INFO}
+  TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cinema}
+      POSTGRES_USER: ${POSTGRES_USER:-cinema}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Dockge environment}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cinema} -d ${POSTGRES_DB:-cinema}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    networks: [app]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [app]
+
+  backend:
+    image: ghcr.io/cachenetworks/plumbus-backend:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment: *app-env
+    command: ["/app/docker-entrypoint.sh", "web"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [app]
+
+  worker:
+    image: ghcr.io/cachenetworks/plumbus-backend:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment: *app-env
+    command: ["/app/docker-entrypoint.sh", "worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [app]
+
+  beat:
+    image: ghcr.io/cachenetworks/plumbus-backend:latest
+    pull_policy: always
+    restart: unless-stopped
+    environment: *app-env
+    command: ["/app/docker-entrypoint.sh", "beat"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [app]
+
+  frontend:
+    image: ghcr.io/cachenetworks/plumbus-frontend:latest
+    pull_policy: always
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [app]
+
+  edge:
+    image: ghcr.io/cachenetworks/plumbus-edge:latest
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    networks: [app]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  app:
