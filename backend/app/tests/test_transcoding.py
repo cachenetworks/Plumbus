@@ -13,6 +13,7 @@ def test_plex_transcode_uses_hls_and_is_server_side():
 def test_rewritten_hls_playlist_does_not_expose_plex_token():
     raw_token = "temporary-playback-token"
     plex_token = "super-secret-plex-token"
+    public_url = "https://cinema.example.test"
     upstream = (
         "#EXTM3U\n"
         "#EXT-X-KEY:METHOD=AES-128,URI=\"http://plex:32400/key?X-Plex-Token="
@@ -22,7 +23,12 @@ def test_rewritten_hls_playlist_does_not_expose_plex_token():
         + plex_token
         + "\n"
     )
-    rewritten = _rewrite_playlist(upstream, "http://plex:32400/master.m3u8", raw_token)
+    rewritten = _rewrite_playlist(
+        upstream,
+        "http://plex:32400/master.m3u8",
+        raw_token,
+        public_url,
+    )
     assert plex_token not in rewritten
     assert "X-Plex-Token" not in rewritten
-    assert f"/stream/{raw_token}/hls/" in rewritten
+    assert f"{public_url}/stream/{raw_token}/hls/" in rewritten
