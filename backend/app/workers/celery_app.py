@@ -3,7 +3,16 @@ from celery.schedules import crontab
 
 from app.core.config import settings
 
-celery_app = Celery("plumbus", broker=settings.REDIS_URL, backend=settings.REDIS_URL)
+# Explicitly include the task module. The worker is started with
+# `-A app.workers.celery_app:celery_app`, so without this include Celery can
+# boot successfully while scan jobs sent by the API are rejected as
+# "unregistered task".
+celery_app = Celery(
+    "plumbus",
+    broker=settings.REDIS_URL,
+    backend=settings.REDIS_URL,
+    include=["app.workers.tasks"],
+)
 celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
