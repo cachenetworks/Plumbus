@@ -10,7 +10,7 @@ from app.services.plex.service import PlexService
 class PlexScanner:
     def __init__(self, db: Session, plex: PlexService | None = None):
         self.db = db
-        self.plex = plex or PlexService.from_db(db)
+        self.plex = plex
 
     def scan_library(
         self,
@@ -30,9 +30,18 @@ class PlexScanner:
             self.db.commit()
             return job
 
+        plex = self.plex or PlexService.for_library(self.db, library)
+        connection = plex.connect()
+        if not connection.connected:
+            job.status = "failed"
+            job.finished_at = datetime.now(UTC)
+            job.last_error = connection.error or "Unable to reach the Plex server that owns this library"
+            self.db.commit()
+            return job
+
         seen_rating_keys: set[str] = set()
         try:
-            rows = self.plex.iter_movies(library.plex_key)
+            rows = plex.iter_movies(library.plex_key)
             for payload in rows:
                 if target_movie and payload["rating_key"] != target_movie.rating_key:
                     continue
@@ -119,7 +128,7 @@ class PlexScanner:
             if failed_job:
                 failed_job.status = "failed"
                 failed_job.finished_at = datetime.now(UTC)
-                failed_job.last_error = str(exc)[:4000]
+                failed_job.last_error = plex._safe_error(exc)[:4000]
                 self.db.commit()
                 return failed_job
             raise
