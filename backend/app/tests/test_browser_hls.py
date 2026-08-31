@@ -1,5 +1,6 @@
 from urllib.parse import parse_qs, urlparse
 
+from app.api.playback import _delivery_for_target
 from app.api.playback_web import _build_browser_transcode_url, _rewrite_browser_playlist
 from app.models.models import MovieMedia
 from app.services.playback.service import PlaybackService
@@ -54,3 +55,21 @@ def test_browser_native_requires_browser_safe_audio():
     assert PlaybackService.browser_native_media(ac3) is False
     assert PlaybackService.browser_native_media(eac3) is False
     assert PlaybackService.browser_native_media(hevc) is False
+
+
+def test_browser_direct_mode_always_uses_original_progressive_stream():
+    media_info = {
+        "browser_native_candidate": False,
+        "allow_plex_transcoding": True,
+        "direct_play_candidate": False,
+    }
+    assert _delivery_for_target("browser", media_info, browser_mode="direct") == "progressive"
+
+
+def test_browser_compatibility_mode_uses_transcoder_only_as_fallback():
+    media_info = {
+        "browser_native_candidate": False,
+        "allow_plex_transcoding": True,
+        "direct_play_candidate": False,
+    }
+    assert _delivery_for_target("browser", media_info, browser_mode="compatibility") == "hls"
