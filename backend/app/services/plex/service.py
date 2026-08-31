@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.models import PlexServer
+from app.models.models import ApplicationSetting, Movie, PlexLibrary, PlexServer
 from app.security.secrets import decrypt_secret
 
 
@@ -25,18 +25,63 @@ class PlexConnectionInfo:
 
 
 class PlexService:
-    def __init__(self, base_url: str | None = None, token: str | None = None):
+    def __init__(self, base_url: str | None = None, token: str | None = None, server_id: int | None = None):
         self.base_url = (base_url if base_url is not None else settings.PLEX_URL).rstrip("/")
         self.token = token if token is not None else settings.PLEX_TOKEN
+        self.server_id = server_id
+
+    @staticmethod
+    def active_server_id(db: Session) -> int | None:
+        row = db.get(ApplicationSetting, "plex_active_server")
+        if not row or not isinstance(row.value, dict):
+            return None
+        try:
+            value = int(row.value.get("server_id"))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     @classmethod
-    def from_db(cls, db: Session) -> "PlexService":
+    def from_db(cls, db: Session, server_id: int | None = None) -> "PlexService":
         if settings.MOCK_PLEX:
-            return cls("mock", "mock")
-        row = db.scalar(select(PlexServer).where(PlexServer.enabled.is_(True)).order_by(PlexServer.id).limit(1))
+            return cls("mock", "mock", server_id=server_id)
+
+        resolved_id = server_id or cls.active_server_id(db)
+        row: PlexServer | None = None
+        if resolved_id:
+            row = db.get(PlexServer, resolved_id)
+            if row and not row.enabled:
+                row = None
+
+        if row is None:
+            row = db.scalar(
+                select(PlexServer)
+                .where(
+                    PlexServer.enabled.is_(True),
+                    PlexServer.base_url != "environment",
+                    PlexServer.token_ciphertext != "environment",
+                )
+                .order_by(PlexServer.id)
+                .limit(1)
+            )
+
         if not row or row.base_url == "environment" or row.token_ciphertext == "environment":
             return cls()
-        return cls(row.base_url, decrypt_secret(row.token_ciphertext))
+        return cls(row.base_url, decrypt_secret(row.token_ciphertext), server_id=row.id)
+
+    @classmethod
+    def for_library(cls, db: Session, library: PlexLibrary | int) -> "PlexService":
+        row = db.get(PlexLibrary, library) if isinstance(library, int) else library
+        if not row:
+            return cls()
+        return cls.from_db(db, server_id=row.server_id)
+
+    @classmethod
+    def for_movie(cls, db: Session, movie: Movie | int) -> "PlexService":
+        row = db.get(Movie, movie) if isinstance(movie, int) else movie
+        if not row:
+            return cls()
+        return cls.for_library(db, row.library_id)
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -62,12 +107,10 @@ class PlexService:
                 machine_identifier="mock-server",
                 libraries=self.get_libraries(),
             )
-        if not self.base_url:
-            return PlexConnectionInfo(connected=False, libraries=[], error="No Plex server URL is configured")
-        if not self.token:
-            return PlexConnectionInfo(connected=False, libraries=[], error="No Plex server access token is configured")
+        if not self.base_url or not self.token:
+            return PlexConnectionInfo(connected=False, libraries=[], error="Plex server URL or access token is missing")
         try:
-            server = PlexApiServer(self.base_url, self.token, timeout=12)
+            server = PlexApiServer(self.base_url, self.token, timeout=10)
             libraries = [
                 {"key": str(section.key), "title": section.title, "type": section.type}
                 for section in server.library.sections()
@@ -78,14 +121,9 @@ class PlexService:
                 version=server.version,
                 machine_identifier=server.machineIdentifier,
                 libraries=libraries,
-                error=None,
             )
         except Exception as exc:
-            return PlexConnectionInfo(
-                connected=False,
-                libraries=[],
-                error=self._safe_error(exc),
-            )
+            return PlexConnectionInfo(connected=False, libraries=[], error=self._safe_error(exc))
 
     def get_libraries(self) -> list[dict[str, Any]]:
         if settings.MOCK_PLEX:
@@ -202,6 +240,7 @@ class PlexService:
             urljoin(f"{self.base_url}/", plex_path.lstrip("/")),
             headers=self._headers(),
             timeout=30,
+            follow_redirects=True,
         )
 
     def get_direct_play_url(self, part_key: str) -> str:
