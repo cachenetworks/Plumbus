@@ -1,7 +1,8 @@
 from sqlalchemy import select
 
 from app.db.database import SessionLocal
-from app.models.models import AuditLog, PlexLibrary, PlexScanJob
+from app.models.models import AuditLog, PlexLibrary, PlexScanJob, PlexServer
+from app.security.secrets import encrypt_secret
 from app.services.plex.account import PlexAccountService
 from app.services.plex.scanner import PlexScanner
 from app.workers.celery_app import celery_app
@@ -82,7 +83,18 @@ def sync_enabled_libraries() -> dict:
 @celery_app.task(name="app.workers.tasks.refresh_plex_account")
 def refresh_plex_account() -> dict:
     with SessionLocal() as db:
-        service = PlexAccountService(db)
-        token = service.account_token(refresh=True)
+        account = PlexAccountService(db)
+        token = account.account_token(refresh=True)
+        refreshed_server = False
+        server = db.scalar(select(PlexServer).where(PlexServer.enabled.is_(True)).limit(1))
+        if token and server and server.server_identifier:
+            for resource in account.resources():
+                if resource.get("client_identifier") != server.server_identifier:
+                    continue
+                access_token = str(resource.get("access_token") or "")
+                if access_token:
+                    server.token_ciphertext = encrypt_secret(access_token)
+                    refreshed_server = True
+                break
         db.commit()
-        return {"linked": bool(token)}
+        return {"linked": bool(token), "server_token_refreshed": refreshed_server}
