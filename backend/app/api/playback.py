@@ -10,6 +10,7 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.db.database import get_db
 from app.models.models import AuditLog, Movie, MovieMedia, PlaybackHistory, User, UserStatus
 from app.security.secrets import decrypt_secret, encrypt_secret
@@ -61,6 +62,28 @@ def _plex_media_headers(plex: PlexService) -> dict[str, str]:
     return headers
 
 
+def _quick_plex_probe(plex: PlexService) -> None:
+    """Verify PMS is reachable without enumerating every library.
+
+    The previous playback path called PlexService.connect(), which constructs a
+    PlexAPI server and requests the full library section list before every Play
+    click. /identity is a tiny PMS endpoint and is enough to fail fast while
+    keeping playback startup responsive.
+    """
+    if settings.MOCK_PLEX:
+        return
+    try:
+        response = PLEX_DIRECT_CLIENT.get(
+            f"{plex.base_url}/identity",
+            headers=_plex_media_headers(plex),
+            timeout=5,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, f"Plex server is unreachable: {plex._safe_error(exc)}") from exc
+    if response.status_code >= 400:
+        raise HTTPException(503, f"Plex server probe returned HTTP {response.status_code}")
+
+
 def _hls_proxy_url(public_base_url: str, raw_token: str, upstream_url: str) -> str:
     return f"{public_base_url}/stream/{raw_token}/hls/{encrypt_secret(upstream_url)}"
 
@@ -93,10 +116,6 @@ def _delivery_for_target(
     browser_mode: BrowserMode = "direct",
 ) -> str:
     if target == "browser":
-        # Browser playback now prefers the original Plex media file. This avoids
-        # PMS transcoder startup, HLS segment generation and encode bottlenecks.
-        # Compatibility mode is only requested after the browser proves it cannot
-        # decode the original source.
         if browser_mode == "direct":
             return "progressive"
         if media_info["allow_plex_transcoding"]:
@@ -127,9 +146,7 @@ def _build_playback(
         raise HTTPException(409, "Only movies and episodes can be played")
 
     plex = _movie_plex(db, movie)
-    connection = plex.connect()
-    if not connection.connected:
-        raise HTTPException(503, f"Plex server is unreachable: {connection.error or 'connection failed'}")
+    _quick_plex_probe(plex)
 
     playback_service = PlaybackService(db)
     token, raw = playback_service.create_token(
@@ -301,10 +318,13 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
 
-    upstream = PLEX_DIRECT_CLIENT.send(
-        PLEX_DIRECT_CLIENT.build_request("GET", plex.stream_url(media.part_key), headers=headers),
-        stream=True,
-    )
+    try:
+        upstream = PLEX_DIRECT_CLIENT.send(
+            PLEX_DIRECT_CLIENT.build_request("GET", plex.stream_url(media.part_key), headers=headers),
+            stream=True,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Unable to read Plex media: {plex._safe_error(exc)}") from exc
     if upstream.status_code >= 400:
         status = upstream.status_code
         upstream.close()
