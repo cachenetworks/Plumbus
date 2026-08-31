@@ -216,7 +216,7 @@ export function WatchPage(){
       onPlay={()=>{setPlaying(true);showControls()}}
       onPause={()=>{setPlaying(false);setControlsVisible(true);void saveProgress(true)}}
       onEnded={()=>{setPlaying(false);void jsonApi('/api/history/complete',{method:'POST',body:JSON.stringify({movie_id:id,position_ms:Math.floor((videoRef.current?.duration||0)*1000)})}).catch(()=>{});if(navigation.next)setTimeout(()=>switchEpisode(navigation.next),1200)}}
-      onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}
+      onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}}
       onError={()=>setError('The browser could not decode this stream. Try enabling Plex transcoding or use the VRChat link mode.')}
     />
     {item?.backdrop_url&&!playing&&<div className="watch-backdrop" style={{backgroundImage:`url(${item.backdrop_url})`}}/>}
