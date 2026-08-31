@@ -1,0 +1,72 @@
+/* CRT-style movie title hover: phosphor bloom, RGB de-sync, scan sweep, and tiny horizontal jitter. */
+.poster-title {
+  position: relative;
+  isolation: isolate;
+  transition: color .14s ease, text-shadow .14s ease, letter-spacing .14s ease;
+}
+
+.poster-title::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  left: -2px;
+  right: -2px;
+  top: -1px;
+  height: 2px;
+  opacity: 0;
+  background: linear-gradient(90deg, transparent, rgba(109,231,255,.88) 28%, rgba(255,255,255,.92) 50%, rgba(156,108,255,.82) 72%, transparent);
+  box-shadow: 0 0 8px rgba(109,231,255,.55), 0 0 14px rgba(156,108,255,.35);
+  mix-blend-mode: screen;
+}
+
+.poster-card:hover .poster-title,
+.poster-card:focus-visible .poster-title {
+  color: #f8fbff;
+  letter-spacing: .012em;
+  text-shadow:
+    -1.5px 0 rgba(255,70,110,.68),
+    1.5px 0 rgba(75,230,255,.78),
+    0 0 5px rgba(255,255,255,.32),
+    0 0 13px rgba(156,108,255,.52);
+  animation: crtTitleJitter 1.9s steps(1,end) infinite;
+}
+
+.poster-card:hover .poster-title::after,
+.poster-card:focus-visible .poster-title::after {
+  opacity: .8;
+  animation: crtTitleSweep 1.35s linear infinite;
+}
+
+@keyframes crtTitleSweep {
+  0% { top: -2px; opacity: 0; }
+  8% { opacity: .72; }
+  55% { opacity: .42; }
+  92% { opacity: .7; }
+  100% { top: calc(100% + 2px); opacity: 0; }
+}
+
+@keyframes crtTitleJitter {
+  0%, 7%, 10%, 44%, 47%, 76%, 79%, 100% { transform: translateX(0); filter: none; }
+  8% { transform: translateX(-.8px); filter: brightness(1.12); }
+  9% { transform: translateX(.7px); }
+  45% { transform: translateX(.55px); text-shadow: -2px 0 rgba(255,70,110,.72), 2px 0 rgba(75,230,255,.8), 0 0 12px rgba(156,108,255,.5); }
+  46% { transform: translateX(-.55px); }
+  77% { transform: translateX(-.7px); filter: brightness(1.08); }
+  78% { transform: translateX(.45px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .poster-card:hover .poster-title,
+  .poster-card:focus-visible .poster-title,
+  .poster-card:hover .poster-title::after,
+  .poster-card:focus-visible .poster-title::after {
+    animation: none;
+  }
+
+  .poster-card:hover .poster-title::after,
+  .poster-card:focus-visible .poster-title::after {
+    top: 55%;
+    opacity: .35;
+  }
+}
