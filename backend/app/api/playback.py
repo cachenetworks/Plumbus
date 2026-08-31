@@ -22,6 +22,16 @@ from app.services.settings import ApplicationSettingsService
 router = APIRouter(tags=["playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 PlaybackTarget = Literal["browser", "vrchat"]
+BrowserMode = Literal["direct", "compatibility"]
+
+# Direct media can issue many Range requests while seeking/buffering. Keep the
+# Plex connection pool warm instead of creating a fresh TCP/TLS client for each
+# request. The original media bytes are never transcoded on this path.
+PLEX_DIRECT_CLIENT = httpx.Client(
+    timeout=None,
+    follow_redirects=True,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=32, keepalive_expiry=120),
+)
 
 
 def _active_playback(raw_token: str, db: Session):
@@ -77,13 +87,24 @@ def _movie_plex(db: Session, movie: Movie) -> PlexService:
     return plex
 
 
-def _delivery_for_target(target: PlaybackTarget, media_info: dict) -> str:
+def _delivery_for_target(
+    target: PlaybackTarget,
+    media_info: dict,
+    browser_mode: BrowserMode = "direct",
+) -> str:
     if target == "browser":
-        if media_info["browser_native_candidate"]:
+        # Browser playback now prefers the original Plex media file. This avoids
+        # PMS transcoder startup, HLS segment generation and encode bottlenecks.
+        # Compatibility mode is only requested after the browser proves it cannot
+        # decode the original source.
+        if browser_mode == "direct":
             return "progressive"
         if media_info["allow_plex_transcoding"]:
             return "hls"
-        raise HTTPException(409, "This file is not browser-native H.264/MP4 and Plex transcoding is disabled. Enable Plex transcoding for web playback.")
+        raise HTTPException(
+            409,
+            "The browser cannot decode the direct Plex source and compatibility transcoding is disabled.",
+        )
     if media_info["direct_play_candidate"]:
         return "progressive"
     if media_info["allow_plex_transcoding"]:
@@ -91,7 +112,14 @@ def _delivery_for_target(target: PlaybackTarget, media_info: dict) -> str:
     raise HTTPException(409, "This file needs Plex transcoding for VRChat, but Plex transcoding is disabled.")
 
 
-def _build_playback(movie_id: int, target: PlaybackTarget, request: Request, user: User, db: Session) -> dict:
+def _build_playback(
+    movie_id: int,
+    target: PlaybackTarget,
+    request: Request,
+    user: User,
+    db: Session,
+    browser_mode: BrowserMode = "direct",
+) -> dict:
     movie = db.get(Movie, movie_id)
     if not movie:
         raise HTTPException(404, "Media item not found")
@@ -118,12 +146,17 @@ def _build_playback(movie_id: int, target: PlaybackTarget, request: Request, use
 
     media_info = playback_service.get_media_info(media)
     try:
-        delivery = _delivery_for_target(target, media_info)
+        delivery = _delivery_for_target(target, media_info, browser_mode=browser_mode)
     except HTTPException:
         playback_service.revoke(token)
         raise
 
-    history = db.scalar(select(PlaybackHistory).where(PlaybackHistory.user_id == user.id, PlaybackHistory.movie_id == movie.id))
+    history = db.scalar(
+        select(PlaybackHistory).where(
+            PlaybackHistory.user_id == user.id,
+            PlaybackHistory.movie_id == movie.id,
+        )
+    )
     resume_position_ms = int(history.last_position_ms or 0) if history and not history.completed else 0
     if history is None:
         history = PlaybackHistory(user_id=user.id, movie_id=movie.id)
@@ -133,16 +166,30 @@ def _build_playback(movie_id: int, target: PlaybackTarget, request: Request, use
     history.completed = False
 
     public_base_url = IntegrationConfigurationService(db).site().app_url.rstrip("/")
-    playback_url = f"{public_base_url}/stream/{raw}/master.m3u8" if delivery == "hls" else f"{public_base_url}/stream/{raw}"
-    db.add(AuditLog(
-        actor_user_id=user.id,
-        event=f"playback.{target}.created",
-        target_type=movie.media_type,
-        target_id=str(movie.id),
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        event_metadata={"target": target, "delivery": delivery, "playback_mode": media_info["playback_mode"], "plex_server_id": plex.server_id},
-    ))
+    playback_url = (
+        f"{public_base_url}/stream/{raw}/master.m3u8"
+        if delivery == "hls"
+        else f"{public_base_url}/stream/{raw}"
+    )
+    event_metadata = {
+        "target": target,
+        "delivery": delivery,
+        "playback_mode": media_info["playback_mode"],
+        "plex_server_id": plex.server_id,
+    }
+    if target == "browser":
+        event_metadata["browser_mode"] = browser_mode
+    db.add(
+        AuditLog(
+            actor_user_id=user.id,
+            event=f"playback.{target}.created",
+            target_type=movie.media_type,
+            target_id=str(movie.id),
+            ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            event_metadata=event_metadata,
+        )
+    )
     db.commit()
     return {
         "media_id": movie.id,
@@ -153,21 +200,40 @@ def _build_playback(movie_id: int, target: PlaybackTarget, request: Request, use
         "resume_position_ms": resume_position_ms,
         "media": media_info,
         "plex_server_id": plex.server_id,
+        "browser_mode": browser_mode if target == "browser" else None,
     }
 
 
 @router.post("/api/playback/movies/{movie_id}")
-def create_playback(movie_id: int, request: Request, target: PlaybackTarget = Query(default="browser"), user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return _build_playback(movie_id, target, request, user, db)
+def create_playback(
+    movie_id: int,
+    request: Request,
+    target: PlaybackTarget = Query(default="browser"),
+    browser_mode: BrowserMode = Query(default="direct"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return _build_playback(movie_id, target, request, user, db, browser_mode=browser_mode)
 
 
 @router.post("/api/playback/media/{media_id}/browser")
-def browser_playback(media_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return _build_playback(media_id, "browser", request, user, db)
+def browser_playback(
+    media_id: int,
+    request: Request,
+    mode: BrowserMode = Query(default="direct"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return _build_playback(media_id, "browser", request, user, db, browser_mode=mode)
 
 
 @router.post("/api/playback/media/{media_id}/vrchat")
-def vrchat_playback(media_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def vrchat_playback(
+    media_id: int,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     result = _build_playback(media_id, "vrchat", request, user, db)
     result["vrchat_url"] = result["playback_url"]
     result["compatibility"] = (
@@ -179,26 +245,52 @@ def vrchat_playback(media_id: int, request: Request, user: User = Depends(get_cu
 
 
 @router.get("/api/playback/media/{media_id}/navigation")
-def episode_navigation(media_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def episode_navigation(
+    media_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
     current = db.get(Movie, media_id)
     if not current:
         raise HTTPException(404, "Media item not found")
     if current.media_type != "episode" or not current.grandparent_rating_key:
         return {"previous": None, "next": None, "series_title": current.grandparent_title}
-    episodes = db.scalars(select(Movie).where(
-        Movie.library_id == current.library_id,
-        Movie.media_type == "episode",
-        Movie.grandparent_rating_key == current.grandparent_rating_key,
-    )).all()
-    episodes = sorted(episodes, key=lambda item: (item.season_number if item.season_number is not None else 999999, item.episode_number if item.episode_number is not None else 999999, item.id))
+    episodes = db.scalars(
+        select(Movie).where(
+            Movie.library_id == current.library_id,
+            Movie.media_type == "episode",
+            Movie.grandparent_rating_key == current.grandparent_rating_key,
+        )
+    ).all()
+    episodes = sorted(
+        episodes,
+        key=lambda item: (
+            item.season_number if item.season_number is not None else 999999,
+            item.episode_number if item.episode_number is not None else 999999,
+            item.id,
+        ),
+    )
     index = next((i for i, item in enumerate(episodes) if item.id == current.id), -1)
 
     def summary(item: Movie | None):
-        return None if item is None else {"id": item.id, "title": item.title, "season_number": item.season_number, "episode_number": item.episode_number}
+        return (
+            None
+            if item is None
+            else {
+                "id": item.id,
+                "title": item.title,
+                "season_number": item.season_number,
+                "episode_number": item.episode_number,
+            }
+        )
 
     previous = episodes[index - 1] if index > 0 else None
     next_item = episodes[index + 1] if index >= 0 and index + 1 < len(episodes) else None
-    return {"previous": summary(previous), "next": summary(next_item), "series_title": current.grandparent_title}
+    return {
+        "previous": summary(previous),
+        "next": summary(next_item),
+        "series_title": current.grandparent_title,
+    }
 
 
 @router.get("/stream/{raw_token}")
@@ -208,24 +300,47 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
     headers = _plex_media_headers(plex)
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
-    client = httpx.Client(timeout=None, follow_redirects=True)
-    upstream = client.send(client.build_request("GET", plex.stream_url(media.part_key), headers=headers), stream=True)
+
+    upstream = PLEX_DIRECT_CLIENT.send(
+        PLEX_DIRECT_CLIENT.build_request("GET", plex.stream_url(media.part_key), headers=headers),
+        stream=True,
+    )
     if upstream.status_code >= 400:
-        upstream.close(); client.close(); raise HTTPException(502, f"Plex stream returned HTTP {upstream.status_code}")
-    allowed = {"content-type":"Content-Type","content-length":"Content-Length","content-range":"Content-Range","accept-ranges":"Accept-Ranges","etag":"ETag","last-modified":"Last-Modified"}
-    response_headers = {out: upstream.headers[src] for src, out in allowed.items() if src in upstream.headers}
+        status = upstream.status_code
+        upstream.close()
+        raise HTTPException(502, f"Plex stream returned HTTP {status}")
+
+    allowed = {
+        "content-type": "Content-Type",
+        "content-length": "Content-Length",
+        "content-range": "Content-Range",
+        "accept-ranges": "Accept-Ranges",
+        "etag": "ETag",
+        "last-modified": "Last-Modified",
+    }
+    response_headers = {
+        out: upstream.headers[src]
+        for src, out in allowed.items()
+        if src in upstream.headers
+    }
     response_headers.setdefault("Accept-Ranges", "bytes")
-    response_headers["Cache-Control"] = "private, no-store"
+    response_headers["Cache-Control"] = "private, no-store, no-transform"
+    response_headers["X-Accel-Buffering"] = "no"
 
     def body() -> Iterator[bytes]:
         try:
-            for chunk in upstream.iter_bytes(chunk_size=1024 * 1024):
+            for chunk in upstream.iter_bytes(chunk_size=4 * 1024 * 1024):
                 if chunk:
                     yield chunk
         finally:
-            upstream.close(); client.close()
+            upstream.close()
 
-    return StreamingResponse(body(), status_code=upstream.status_code, headers=response_headers, media_type=upstream.headers.get("content-type", "application/octet-stream"))
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type", "application/octet-stream"),
+    )
 
 
 @router.get("/stream/{raw_token}/master.m3u8")
@@ -235,20 +350,49 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
     if not media_info["allow_plex_transcoding"]:
         raise HTTPException(409, "Plex transcoding is disabled")
     prefs = ApplicationSettingsService(db).playback()
-    resolution = {"720p":"1280x720","1080p":"1920x1080","1440p":"2560x1440","4k":"3840x2160","2160p":"3840x2160"}.get(str(prefs["preferred_resolution"]).lower(), "1920x1080")
+    resolution = {
+        "720p": "1280x720",
+        "1080p": "1920x1080",
+        "1440p": "2560x1440",
+        "4k": "3840x2160",
+        "2160p": "3840x2160",
+    }.get(str(prefs["preferred_resolution"]).lower(), "1920x1080")
     plex = _movie_plex(db, movie)
-    upstream_url = plex.get_transcode_url(movie.rating_key, max_video_bitrate=int(prefs["max_stream_bitrate_kbps"]), video_resolution=resolution)
+    upstream_url = plex.get_transcode_url(
+        movie.rating_key,
+        max_video_bitrate=int(prefs["max_stream_bitrate_kbps"]),
+        video_resolution=resolution,
+    )
     _assert_plex_url(plex, upstream_url)
-    response = httpx.get(upstream_url, headers=_plex_media_headers(plex), timeout=30, follow_redirects=True)
+    response = httpx.get(
+        upstream_url,
+        headers=_plex_media_headers(plex),
+        timeout=30,
+        follow_redirects=True,
+    )
     if response.status_code >= 400:
         raise HTTPException(502, f"Plex transcoder returned HTTP {response.status_code}")
     _assert_plex_url(plex, str(response.url))
-    rewritten = _rewrite_playlist(response.text, str(response.url), raw_token, IntegrationConfigurationService(db).site().app_url)
-    return Response(rewritten, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control":"private, no-store"})
+    rewritten = _rewrite_playlist(
+        response.text,
+        str(response.url),
+        raw_token,
+        IntegrationConfigurationService(db).site().app_url,
+    )
+    return Response(
+        rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 @router.get("/stream/{raw_token}/hls/{opaque}")
-def transcode_resource(raw_token: str, opaque: str, request: Request, db: Session = Depends(get_db)):
+def transcode_resource(
+    raw_token: str,
+    opaque: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     _token, _user, movie, _media = _active_playback(raw_token, db)
     plex = _movie_plex(db, movie)
     try:
@@ -260,20 +404,40 @@ def transcode_resource(raw_token: str, opaque: str, request: Request, db: Sessio
     if request.headers.get("range"):
         headers["Range"] = request.headers["range"]
     client = httpx.Client(timeout=None, follow_redirects=True)
-    upstream = client.send(client.build_request("GET", upstream_url, headers=headers), stream=True)
+    upstream = client.send(
+        client.build_request("GET", upstream_url, headers=headers),
+        stream=True,
+    )
     if upstream.status_code >= 400:
-        upstream.close(); client.close(); raise HTTPException(502, f"Plex transcode resource returned HTTP {upstream.status_code}")
+        status = upstream.status_code
+        upstream.close()
+        client.close()
+        raise HTTPException(502, f"Plex transcode resource returned HTTP {status}")
     _assert_plex_url(plex, str(upstream.url))
     content_type = upstream.headers.get("content-type", "application/octet-stream")
     if "mpegurl" in content_type.lower() or str(upstream.url).lower().split("?", 1)[0].endswith(".m3u8"):
         try:
             data = b"".join(upstream.iter_bytes()).decode("utf-8")
         finally:
-            upstream.close(); client.close()
-        rewritten = _rewrite_playlist(data, str(upstream.url), raw_token, IntegrationConfigurationService(db).site().app_url)
-        return Response(rewritten, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control":"private, no-store"})
-    response_headers = {"Cache-Control":"private, no-store"}
-    for source, target in (("content-length","Content-Length"),("content-range","Content-Range"),("accept-ranges","Accept-Ranges")):
+            upstream.close()
+            client.close()
+        rewritten = _rewrite_playlist(
+            data,
+            str(upstream.url),
+            raw_token,
+            IntegrationConfigurationService(db).site().app_url,
+        )
+        return Response(
+            rewritten,
+            media_type="application/vnd.apple.mpegurl",
+            headers={"Cache-Control": "private, no-store"},
+        )
+    response_headers = {"Cache-Control": "private, no-store"}
+    for source, target in (
+        ("content-length", "Content-Length"),
+        ("content-range", "Content-Range"),
+        ("accept-ranges", "Accept-Ranges"),
+    ):
         if source in upstream.headers:
             response_headers[target] = upstream.headers[source]
 
@@ -283,6 +447,12 @@ def transcode_resource(raw_token: str, opaque: str, request: Request, db: Sessio
                 if chunk:
                     yield chunk
         finally:
-            upstream.close(); client.close()
+            upstream.close()
+            client.close()
 
-    return StreamingResponse(body(), status_code=upstream.status_code, headers=response_headers, media_type=content_type)
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=content_type,
+    )
