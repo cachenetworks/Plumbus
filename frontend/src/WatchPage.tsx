@@ -197,7 +197,7 @@ export function WatchPage(){
 
   function exitPlayer(){
     void saveProgress(true)
-    window.location.href=`/media/${id}`
+    navigate(`/media/${id}`)
   }
 
   useEffect(()=>()=>{if(hideTimerRef.current)window.clearTimeout(hideTimerRef.current)},[])
