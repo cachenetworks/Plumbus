@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, MonitorPlay, RadioTower, X } from 'lucide-react'
+import { Copy, ExternalLink, Play, RadioTower, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
@@ -13,7 +13,7 @@ type VrChatResponse={
   media?:{resolution?:string;video_codec?:string;container?:string}
 }
 
-type MediaState={playable?:boolean;media_type?:string}
+type MediaState={playable?:boolean;media_type?:string;title?:string}
 
 async function postVrChat(id:number):Promise<VrChatResponse>{
   const response=await fetch(`/api/playback/media/${id}/vrchat`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'}})
@@ -29,17 +29,21 @@ export function PlaybackToolbar(){
   const location=useLocation()
   const mediaId=useMemo(()=>Number(location.pathname.match(/^\/media\/(\d+)$/)?.[1]||0),[location.pathname])
   const [playable,setPlayable]=useState(false)
+  const [title,setTitle]=useState('')
   const [result,setResult]=useState<VrChatResponse|null>(null)
   const [error,setError]=useState('')
   const [loading,setLoading]=useState(false)
   const [copied,setCopied]=useState(false)
 
   useEffect(()=>{
-    setResult(null);setError('');setCopied(false);setPlayable(false)
+    setResult(null);setError('');setCopied(false);setPlayable(false);setTitle('')
     if(!mediaId)return
     fetch(`/api/movies/${mediaId}`,{credentials:'include'})
       .then(async response=>response.ok?response.json():Promise.reject())
-      .then((media:MediaState)=>setPlayable(Boolean(media.playable&&(media.media_type==='movie'||media.media_type==='episode'))))
+      .then((media:MediaState)=>{
+        setPlayable(Boolean(media.playable&&(media.media_type==='movie'||media.media_type==='episode')))
+        setTitle(media.title||'')
+      })
       .catch(()=>setPlayable(false))
   },[mediaId])
   if(!mediaId||!playable)return null
@@ -56,9 +60,9 @@ export function PlaybackToolbar(){
   }
 
   return <>
-    <div className="playback-float">
-      <a className="playback-float-btn primary" href={`/watch/${mediaId}`}><MonitorPlay size={18}/> WATCH IN BROWSER</a>
-      <button className="playback-float-btn" disabled={loading} onClick={generate}><RadioTower size={18}/>{loading?'GENERATING...':'GET VRCHAT LINK'}</button>
+    <div className="playback-float" aria-label={`Playback options for ${title}`}>
+      <a className="playback-float-btn netflix-play" href={`/watch/${mediaId}`}><Play size={24} fill="currentColor"/> PLAY</a>
+      <button className="playback-float-btn vrchat-action" disabled={loading} onClick={generate}><RadioTower size={19}/>{loading?'GENERATING...':'VRCHAT LINK'}</button>
     </div>
     {(result||error)&&<div className="vrchat-modal-backdrop" onClick={()=>{setResult(null);setError('')}}>
       <div className="vrchat-modal" onClick={e=>e.stopPropagation()}>
