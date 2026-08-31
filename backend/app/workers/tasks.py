@@ -2,6 +2,7 @@ from sqlalchemy import select
 
 from app.db.database import SessionLocal
 from app.models.models import AuditLog, PlexLibrary, PlexScanJob
+from app.services.plex.account import PlexAccountService
 from app.services.plex.scanner import PlexScanner
 from app.workers.celery_app import celery_app
 
@@ -76,3 +77,12 @@ def sync_enabled_libraries() -> dict:
     for job_id in queued:
         scan_library.delay(job_id)
     return {"queued": queued}
+
+
+@celery_app.task(name="app.workers.tasks.refresh_plex_account")
+def refresh_plex_account() -> dict:
+    with SessionLocal() as db:
+        service = PlexAccountService(db)
+        token = service.account_token(refresh=True)
+        db.commit()
+        return {"linked": bool(token)}
