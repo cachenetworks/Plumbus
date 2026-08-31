@@ -1,10 +1,11 @@
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Literal
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +21,7 @@ from app.services.settings import ApplicationSettingsService
 
 router = APIRouter(tags=["playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
+PlaybackTarget = Literal["browser", "vrchat"]
 
 
 def _active_playback(raw_token: str, db: Session):
@@ -58,12 +60,7 @@ def _hls_proxy_url(public_base_url: str, raw_token: str, upstream_url: str) -> s
     return f"{public_base_url}/stream/{raw_token}/hls/{opaque}"
 
 
-def _rewrite_playlist(
-    text: str,
-    base_url: str,
-    raw_token: str,
-    public_base_url: str,
-) -> str:
+def _rewrite_playlist(text: str, base_url: str, raw_token: str, public_base_url: str) -> str:
     output: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -83,25 +80,49 @@ def _rewrite_playlist(
 def _movie_plex(db: Session, movie: Movie) -> PlexService:
     plex = PlexService.for_movie(db, movie)
     if not plex.base_url or not plex.token:
-        raise HTTPException(503, "The Plex server for this movie is not configured")
+        raise HTTPException(503, "The Plex server for this media item is not configured")
     return plex
+
+
+def _delivery_for_target(target: PlaybackTarget, media_info: dict) -> str:
+    if target == "browser":
+        if media_info["browser_native_candidate"]:
+            return "direct"
+        if media_info["allow_plex_transcoding"]:
+            return "hls"
+        raise HTTPException(
+            409,
+            "This file is not browser-native H.264/MP4 and Plex transcoding is disabled. Enable transcoding for web playback.",
+        )
+
+    if media_info["direct_play_candidate"]:
+        return "direct"
+    if media_info["allow_plex_transcoding"]:
+        return "hls"
+    raise HTTPException(
+        409,
+        "This file needs Plex transcoding before it can be delivered to VRChat, but transcoding is disabled.",
+    )
 
 
 @router.post("/api/playback/movies/{movie_id}")
 def create_playback(
     movie_id: int,
     request: Request,
+    target: PlaybackTarget = Query(default="browser"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     movie = db.get(Movie, movie_id)
     if not movie:
-        raise HTTPException(404, "Movie not found")
+        raise HTTPException(404, "Media item not found")
+    if movie.media_type not in {"movie", "episode"}:
+        raise HTTPException(409, "Only movies and episodes can be played")
 
     plex = _movie_plex(db, movie)
     connection = plex.connect()
     if not connection.connected:
-        raise HTTPException(503, f"Movie Plex server is unreachable: {connection.error or 'connection failed'}")
+        raise HTTPException(503, f"Plex server is unreachable: {connection.error or 'connection failed'}")
 
     playback_service = PlaybackService(db)
     token, raw = playback_service.create_token(
@@ -109,12 +130,19 @@ def create_playback(
         movie,
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
+        target=target,
     )
     media = db.get(MovieMedia, token.movie_media_id)
-    media_info = playback_service.get_media_info(media)
-    if media_info["playback_mode"] == "Transcode Required" and not media_info["allow_plex_transcoding"]:
+    if media is None:
         playback_service.revoke(token)
-        raise HTTPException(409, "This media requires transcoding, but Plex transcoding is disabled")
+        raise HTTPException(410, "Indexed media is no longer available")
+
+    media_info = playback_service.get_media_info(media)
+    try:
+        delivery = _delivery_for_target(target, media_info)
+    except HTTPException:
+        playback_service.revoke(token)
+        raise
 
     history = db.scalar(
         select(PlaybackHistory).where(
@@ -129,22 +157,23 @@ def create_playback(
     history.last_watched_at = datetime.now(UTC)
     history.completed = False
 
-    public_base_url = IntegrationConfigurationService(db).site().app_url
-    transcode = media_info["playback_mode"] == "Transcode Required"
+    public_base_url = IntegrationConfigurationService(db).site().app_url.rstrip("/")
     playback_url = (
         f"{public_base_url}/stream/{raw}/master.m3u8"
-        if transcode
+        if delivery == "hls"
         else f"{public_base_url}/stream/{raw}"
     )
     db.add(
         AuditLog(
             actor_user_id=user.id,
-            event="playback.created",
-            target_type="movie",
+            event=f"playback.{target}.created",
+            target_type=movie.media_type,
             target_id=str(movie.id),
             ip=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
             event_metadata={
+                "target": target,
+                "delivery": delivery,
                 "playback_mode": media_info["playback_mode"],
                 "plex_server_id": plex.server_id,
             },
@@ -152,10 +181,20 @@ def create_playback(
     )
     db.commit()
     return {
+        "target": target,
+        "delivery": delivery,
         "playback_url": playback_url,
         "expires_at": token.expires_at,
         "media": media_info,
         "plex_server_id": plex.server_id,
+        "vrchat": {
+            "ready": target == "vrchat",
+            "recommended_player": "AVPro Video",
+            "requires_allow_untrusted_urls": True,
+            "direct": delivery == "direct",
+        }
+        if target == "vrchat"
+        else None,
     }
 
 
@@ -243,12 +282,7 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
         raise HTTPException(502, f"Plex transcoder returned HTTP {response.status_code}")
     _assert_plex_url(plex, str(response.url))
     public_base_url = IntegrationConfigurationService(db).site().app_url
-    rewritten = _rewrite_playlist(
-        response.text,
-        str(response.url),
-        raw_token,
-        public_base_url,
-    )
+    rewritten = _rewrite_playlist(response.text, str(response.url), raw_token, public_base_url)
     return Response(
         rewritten,
         media_type="application/vnd.apple.mpegurl",
@@ -257,12 +291,7 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
 
 
 @router.get("/stream/{raw_token}/hls/{opaque}")
-def transcode_resource(
-    raw_token: str,
-    opaque: str,
-    request: Request,
-    db: Session = Depends(get_db),
-):
+def transcode_resource(raw_token: str, opaque: str, request: Request, db: Session = Depends(get_db)):
     _token, _user, movie, _media = _active_playback(raw_token, db)
     plex = _movie_plex(db, movie)
     try:
@@ -292,12 +321,7 @@ def transcode_resource(
             upstream.close()
             client.close()
         public_base_url = IntegrationConfigurationService(db).site().app_url
-        rewritten = _rewrite_playlist(
-            data,
-            str(upstream.url),
-            raw_token,
-            public_base_url,
-        )
+        rewritten = _rewrite_playlist(data, str(upstream.url), raw_token, public_base_url)
         return Response(
             rewritten,
             media_type="application/vnd.apple.mpegurl",
