@@ -136,5 +136,4 @@ volumes:
 
 networks:
   internal:
-    internal: true
   edge:
