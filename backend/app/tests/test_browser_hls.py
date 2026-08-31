@@ -3,12 +3,13 @@ from urllib.parse import parse_qs, urlparse
 from app.api.playback import _delivery_for_target
 from app.api.playback_web import (
     _build_browser_audio_url,
+    _build_browser_copy_url,
     _build_browser_transcode_url,
-    _needs_audio_compat,
     _rewrite_browser_playlist,
 )
 from app.models.models import MovieMedia
 from app.services.playback.service import PlaybackService
+from app.services.plex.audio_tracks import choose_direct_browser_audio_track
 from app.services.plex.service import PlexService
 
 
@@ -33,7 +34,7 @@ def test_browser_transcode_forces_h264_aac_profile():
     assert "audioCodec=aac" in profile
 
 
-def test_browser_audio_fix_prefers_video_copy_and_aac_audio():
+def test_legacy_audio_fix_prefers_video_copy_and_aac_audio():
     plex = PlexService("http://plex:32400", "secret-token")
     media = MovieMedia(
         container="mkv",
@@ -49,24 +50,86 @@ def test_browser_audio_fix_prefers_video_copy_and_aac_audio():
     assert query["directStream"] == ["1"]
     assert query["directStreamAudio"] == ["0"]
     assert int(query["maxVideoBitrate"][0]) > media.bitrate
+
+
+def test_alternate_audio_direct_stream_copies_both_tracks_and_exact_version():
+    plex = PlexService("http://plex:32400", "secret-token")
+    media = MovieMedia(
+        container="mkv",
+        video_codec="h264",
+        audio_codec="dts",
+        bitrate=18000,
+    )
+    track = {
+        "id": "77",
+        "codec": "aac",
+        "media_index": 2,
+        "part_index": 1,
+    }
+    url = _build_browser_copy_url(plex, "12345", media, track)
+    query = parse_qs(urlparse(url).query)
+
+    assert query["protocol"] == ["hls"]
+    assert query["mediaIndex"] == ["2"]
+    assert query["partIndex"] == ["1"]
+    assert query["audioStreamID"] == ["77"]
+    assert query["directPlay"] == ["0"]
+    assert query["directStream"] == ["1"]
+    assert query["directStreamAudio"] == ["1"]
+    assert int(query["maxVideoBitrate"][0]) > media.bitrate
     profile = query["X-Plex-Client-Profile-Extra"][0]
-    assert "videoCodec=h264,hevc" in profile
+    assert "videoCodec=h264" in profile
     assert "audioCodec=aac" in profile
 
 
-def test_silent_browser_audio_codecs_trigger_audio_fix():
-    base = {
-        "direct_play_candidate": True,
-        "allow_plex_transcoding": True,
-    }
-    assert _needs_audio_compat({**base, "audio_codec": "ac3"}) is True
-    assert _needs_audio_compat({**base, "audio_codec": "eac3"}) is True
-    assert _needs_audio_compat({**base, "audio_codec": "dts"}) is True
-    assert _needs_audio_compat({**base, "audio_codec": "truehd"}) is True
-    assert _needs_audio_compat({**base, "audio_codec": "aac"}) is False
-    assert _needs_audio_compat({**base, "audio_codec": "mp3"}) is False
-    assert _needs_audio_compat({**base, "audio_codec": ""}) is False
-    assert _needs_audio_compat({**base, "audio_codec": "ac3", "allow_plex_transcoding": False}) is False
+def test_direct_audio_selection_preserves_primary_language_and_avoids_commentary():
+    tracks = [
+        {
+            "id": "10",
+            "codec": "dts",
+            "language": "English",
+            "language_code": "eng",
+            "selected": True,
+            "default": True,
+            "channels": 6,
+            "title": None,
+        },
+        {
+            "id": "11",
+            "codec": "aac",
+            "language": "Japanese",
+            "language_code": "jpn",
+            "selected": False,
+            "default": False,
+            "channels": 2,
+            "title": None,
+        },
+        {
+            "id": "12",
+            "codec": "aac",
+            "language": "English",
+            "language_code": "eng",
+            "selected": False,
+            "default": False,
+            "channels": 2,
+            "title": "Director Commentary",
+        },
+        {
+            "id": "13",
+            "codec": "aac",
+            "language": "English",
+            "language_code": "eng",
+            "selected": False,
+            "default": False,
+            "channels": 2,
+            "title": None,
+        },
+    ]
+
+    selected = choose_direct_browser_audio_track(tracks, video_codec="h264")
+    assert selected is not None
+    assert selected["id"] == "13"
+    assert choose_direct_browser_audio_track(tracks, video_codec="hevc") is None
 
 
 def test_browser_hls_playlist_uses_same_origin_proxy_paths():
