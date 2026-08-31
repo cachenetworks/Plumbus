@@ -5,7 +5,7 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.models import AuditLog, Movie, MovieMedia, MovieTag, PlexLibrary, Role, User
+from app.models.models import AuditLog, Movie, MovieMedia, MovieTag, PlexLibrary, PlexServer, Role, User
 from app.security.security import get_current_user, require_role
 from app.services.playback.service import PlaybackService
 from app.services.plex.service import PlexService
@@ -37,6 +37,7 @@ def _movie_dict(movie: Movie, db: Session, detail: bool = False) -> dict:
     media = db.scalars(select(MovieMedia).where(MovieMedia.movie_id == movie.id)).all()
     tags = db.scalars(select(MovieTag).where(MovieTag.movie_id == movie.id)).all()
     library = db.get(PlexLibrary, movie.library_id)
+    server = db.get(PlexServer, library.server_id) if library else None
     grouped: dict[str, list[str]] = {}
     for tag in tags:
         grouped.setdefault(tag.kind, []).append(tag.value)
@@ -50,7 +51,12 @@ def _movie_dict(movie: Movie, db: Session, detail: bool = False) -> dict:
         "genres": grouped.get("genre", []),
         "collections": grouped.get("collection", []),
         "qualities": sorted({m.resolution for m in media if m.resolution}),
-        "library": {"id": library.id, "title": library.title} if library else None,
+        "library": {
+            "id": library.id,
+            "title": library.title,
+            "server_id": library.server_id,
+            "server_name": server.server_name if server else None,
+        } if library else None,
         "added_at": movie.added_at,
         "updated_at": movie.plex_updated_at,
     }
@@ -216,7 +222,10 @@ def _art(movie_id: int, attr: str, user: User, db: Session) -> Response:
     plex_path = getattr(movie, attr)
     if not plex_path:
         raise HTTPException(404, "Artwork unavailable")
-    upstream = PlexService.from_db(db).artwork_response(plex_path)
+    plex = PlexService.for_movie(db, movie)
+    if not plex.base_url or not plex.token:
+        raise HTTPException(503, "Movie Plex server is not configured")
+    upstream = plex.artwork_response(plex_path)
     if upstream.status_code != 200:
         raise HTTPException(502, "Plex artwork unavailable")
     return Response(
