@@ -13,7 +13,14 @@ BROWSER_COPY_AUDIO_CODECS = {"aac", "mp3"}
 BROWSER_COPY_VIDEO_CODECS = {"h264", "avc"}
 
 
-def _track_row(stream: Any) -> dict[str, Any]:
+def _track_row(
+    stream: Any,
+    *,
+    media_index: int,
+    part_index: int,
+    part_key: str,
+    plex_media_id: str,
+) -> dict[str, Any]:
     return {
         "id": str(getattr(stream, "id", "") or ""),
         "codec": str(getattr(stream, "codec", "") or "").lower(),
@@ -26,6 +33,10 @@ def _track_row(stream: Any) -> dict[str, Any]:
         "title": getattr(stream, "title", None),
         "display_title": getattr(stream, "displayTitle", None),
         "extended_display_title": getattr(stream, "extendedDisplayTitle", None),
+        "media_index": media_index,
+        "part_index": part_index,
+        "part_key": part_key,
+        "plex_media_id": plex_media_id,
     }
 
 
@@ -55,6 +66,10 @@ def fetch_audio_tracks(
                 "title": None,
                 "display_title": "English (AAC Stereo)",
                 "extended_display_title": "English (AAC Stereo)",
+                "media_index": 0,
+                "part_index": 0,
+                "part_key": part_key or "/library/parts/mock/file.mp4",
+                "plex_media_id": plex_media_id or "mock-media",
             }
         ]
 
@@ -63,11 +78,11 @@ def fetch_audio_tracks(
     item = server.fetchItem(key)
 
     fallback: list[dict[str, Any]] = []
-    for media in getattr(item, "media", []) or []:
-        media_id = str(getattr(media, "id", "") or "")
+    for media_index, plex_media in enumerate(getattr(item, "media", []) or []):
+        media_id = str(getattr(plex_media, "id", "") or "")
         if plex_media_id and media_id and media_id != str(plex_media_id):
             continue
-        for part in getattr(media, "parts", []) or []:
+        for part_index, part in enumerate(getattr(plex_media, "parts", []) or []):
             current_part_key = str(getattr(part, "key", "") or "")
             try:
                 streams = list(part.audioStreams())
@@ -77,7 +92,16 @@ def fetch_audio_tracks(
                     for stream in (getattr(part, "streams", []) or [])
                     if int(getattr(stream, "streamType", 0) or 0) == 2
                 ]
-            rows = [_track_row(stream) for stream in streams]
+            rows = [
+                _track_row(
+                    stream,
+                    media_index=media_index,
+                    part_index=part_index,
+                    part_key=current_part_key,
+                    plex_media_id=media_id,
+                )
+                for stream in streams
+            ]
             rows = [row for row in rows if row["id"] or row["codec"]]
             if rows and not fallback:
                 fallback = rows
@@ -102,7 +126,10 @@ def _looks_like_commentary(track: dict[str, Any]) -> bool:
         str(track.get(key) or "")
         for key in ("title", "display_title", "extended_display_title")
     ).casefold()
-    return any(word in text for word in ("commentary", "description", "descriptive", "audio description"))
+    return any(
+        word in text
+        for word in ("commentary", "description", "descriptive", "audio description")
+    )
 
 
 def primary_audio_track(tracks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -169,7 +196,7 @@ def ensure_audio_tracks(
 ) -> list[dict[str, Any]]:
     """Return cached tracks, lazily filling old scan rows from Plex when needed."""
     tracks = cached_audio_tracks(movie, media)
-    if tracks:
+    if tracks and all("media_index" in track and "part_index" in track for track in tracks):
         return tracks
 
     try:
@@ -180,7 +207,7 @@ def ensure_audio_tracks(
             plex_media_id=media.plex_media_id,
         )
     except Exception:
-        return []
+        return tracks or []
     if not tracks or not media.part_key:
         return tracks
 
