@@ -21,6 +21,7 @@ class PlexConnectionInfo:
     version: str | None = None
     machine_identifier: str | None = None
     libraries: list[dict[str, Any]] | None = None
+    error: str | None = None
 
 
 class PlexService:
@@ -46,6 +47,12 @@ class PlexService:
             "Accept": "application/json",
         }
 
+    def _safe_error(self, exc: Exception) -> str:
+        message = f"{type(exc).__name__}: {exc}"
+        if self.token:
+            message = message.replace(self.token, "[redacted]")
+        return message[:1000]
+
     def connect(self) -> PlexConnectionInfo:
         if settings.MOCK_PLEX:
             return PlexConnectionInfo(
@@ -55,10 +62,12 @@ class PlexService:
                 machine_identifier="mock-server",
                 libraries=self.get_libraries(),
             )
-        if not self.base_url or not self.token:
-            return PlexConnectionInfo(connected=False, libraries=[])
+        if not self.base_url:
+            return PlexConnectionInfo(connected=False, libraries=[], error="No Plex server URL is configured")
+        if not self.token:
+            return PlexConnectionInfo(connected=False, libraries=[], error="No Plex server access token is configured")
         try:
-            server = PlexApiServer(self.base_url, self.token, timeout=10)
+            server = PlexApiServer(self.base_url, self.token, timeout=12)
             libraries = [
                 {"key": str(section.key), "title": section.title, "type": section.type}
                 for section in server.library.sections()
@@ -69,9 +78,14 @@ class PlexService:
                 version=server.version,
                 machine_identifier=server.machineIdentifier,
                 libraries=libraries,
+                error=None,
             )
-        except Exception:
-            return PlexConnectionInfo(connected=False, libraries=[])
+        except Exception as exc:
+            return PlexConnectionInfo(
+                connected=False,
+                libraries=[],
+                error=self._safe_error(exc),
+            )
 
     def get_libraries(self) -> list[dict[str, Any]]:
         if settings.MOCK_PLEX:
