@@ -1,10 +1,11 @@
 import re
 from collections.abc import Iterator
+from typing import Literal
 from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -24,9 +25,10 @@ from app.services.settings import ApplicationSettingsService
 
 router = APIRouter(tags=["browser-playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
+BrowserMode = Literal["direct", "compatibility"]
 
-# HLS consists of many short requests. Reusing a process-wide HTTP client keeps
-# TCP/TLS connections to PMS warm instead of reconnecting for every segment.
+# HLS is only used as a compatibility fallback now. Keep the pool warm when it
+# is needed so fallback playback does not reconnect for every segment.
 PLEX_STREAM_CLIENT = httpx.Client(
     timeout=None,
     follow_redirects=True,
@@ -54,12 +56,6 @@ def _rewrite_browser_playlist(text: str, base_url: str, raw_token: str) -> str:
 
 
 def _browser_bitrate(prefs: dict) -> int:
-    """Keep the web profile comfortably below the configured ceiling.
-
-    Plex/VRChat can still use the full configured bitrate. The browser profile is
-    intentionally conservative because it passes Plex -> Plumbus -> browser and
-    therefore benefits more from headroom than maximum source quality.
-    """
     configured = int(prefs["max_stream_bitrate_kbps"])
     preferred = str(prefs["preferred_resolution"]).lower()
     ceiling = {
@@ -131,16 +127,27 @@ def _resolution(prefs: dict) -> str:
 def browser_playback(
     media_id: int,
     request: Request,
+    mode: BrowserMode = Query(default="direct"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    result = _build_playback(media_id, "browser", request, user, db)
+    result = _build_playback(
+        media_id,
+        "browser",
+        request,
+        user,
+        db,
+        browser_mode=mode,
+    )
     parsed = urlparse(result["playback_url"])
     relative = parsed.path
     if parsed.query:
         relative += f"?{parsed.query}"
     result["playback_url"] = relative
-    result["browser_codec_profile"] = "H.264/AAC" if result["delivery"] == "hls" else "native"
+    result["browser_codec_profile"] = (
+        "ORIGINAL_PLEX_SOURCE" if mode == "direct" else "H.264/AAC"
+    )
+    result["stream_mode"] = mode
     return result
 
 
@@ -218,7 +225,10 @@ def browser_transcode_resource(
     _assert_plex_url(plex, str(upstream.url))
 
     content_type = upstream.headers.get("content-type", "application/octet-stream")
-    is_playlist = "mpegurl" in content_type.lower() or str(upstream.url).lower().split("?", 1)[0].endswith(".m3u8")
+    is_playlist = (
+        "mpegurl" in content_type.lower()
+        or str(upstream.url).lower().split("?", 1)[0].endswith(".m3u8")
+    )
     if is_playlist:
         try:
             data = b"".join(upstream.iter_bytes()).decode("utf-8")
