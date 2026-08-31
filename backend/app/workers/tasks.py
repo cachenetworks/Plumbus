@@ -92,7 +92,7 @@ def refresh_plex_account() -> dict:
         if token:
             resources = {
                 str(resource.get("client_identifier") or ""): resource
-                for resource in account.resources()
+                for resource in account.resources(probe=False)
             }
             servers = db.scalars(
                 select(PlexServer).where(
