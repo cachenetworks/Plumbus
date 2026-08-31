@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import audit, auth, health, history, invites, movies, playback, playback_admin, plex, settings as settings_api, setup, users, webhooks
 from app.core.config import settings
@@ -13,7 +12,6 @@ app = FastAPI(
     redoc_url=None,
 )
 
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 app.add_middleware(SecurityGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
