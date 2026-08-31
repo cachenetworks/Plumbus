@@ -203,6 +203,22 @@ class PlexAccountService:
         self.db.flush()
         return token
 
+    def _probe_connection(self, uri: str, token: str) -> tuple[bool, str | None]:
+        try:
+            response = httpx.get(
+                uri.rstrip("/") + "/identity",
+                headers=self.headers(token),
+                timeout=4,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            return True, None
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            if token:
+                message = message.replace(token, "[redacted]")
+            return False, message[:500]
+
     def resources(self) -> list[dict]:
         token = self.account_token(refresh=True)
         if not token:
@@ -218,14 +234,30 @@ class PlexAccountService:
         for item in response.json():
             if "server" not in (item.get("provides") or ""):
                 continue
-            connections = item.get("connections") or []
-            connections = sorted(
-                connections,
+            server_token = str(item.get("accessToken") or "")
+            connections = []
+            for connection in item.get("connections") or []:
+                uri = connection.get("uri")
+                if not uri:
+                    continue
+                reachable, error = self._probe_connection(str(uri), server_token) if server_token else (False, "No server token")
+                connections.append(
+                    {
+                        "uri": uri,
+                        "local": bool(connection.get("local")),
+                        "relay": bool(connection.get("relay")),
+                        "protocol": connection.get("protocol"),
+                        "reachable": reachable,
+                        "error": error,
+                    }
+                )
+            connections.sort(
                 key=lambda x: (
+                    not bool(x.get("reachable")),
                     bool(x.get("relay")),
                     not bool(x.get("local")),
                     x.get("protocol") != "https",
-                ),
+                )
             )
             resources.append(
                 {
@@ -233,16 +265,7 @@ class PlexAccountService:
                     "client_identifier": item.get("clientIdentifier"),
                     "owned": bool(item.get("owned")),
                     "access_token": item.get("accessToken"),
-                    "connections": [
-                        {
-                            "uri": c.get("uri"),
-                            "local": bool(c.get("local")),
-                            "relay": bool(c.get("relay")),
-                            "protocol": c.get("protocol"),
-                        }
-                        for c in connections
-                        if c.get("uri")
-                    ],
+                    "connections": connections,
                 }
             )
         return resources
