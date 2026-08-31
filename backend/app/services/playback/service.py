@@ -27,7 +27,7 @@ class PlaybackService:
         return (
             container in {"mp4", "m4v"}
             and video_codec in {"h264", "avc"}
-            and audio_codec in {"aac", "mp3", ""}
+            and audio_codec in {"aac", "mp3"}
             and bitrate_ok
         )
 
