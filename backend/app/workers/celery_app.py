@@ -17,5 +17,9 @@ celery_app.conf.beat_schedule = {
     "sync-plex-libraries": {
         "task": "app.workers.tasks.sync_enabled_libraries",
         "schedule": settings.PLEX_SCAN_INTERVAL_MINUTES * 60,
-    }
+    },
+    "refresh-plex-account": {
+        "task": "app.workers.tasks.refresh_plex_account",
+        "schedule": crontab(hour=3, minute=20),
+    },
 }
