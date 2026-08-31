@@ -27,6 +27,7 @@ def scan_library(job_id: int, target_movie_id: int | None = None) -> dict:
                 event_metadata={
                     "mode": job.mode,
                     "library_id": library.id,
+                    "server_id": library.server_id,
                     "target_movie_id": target_movie_id,
                 },
             )
@@ -44,6 +45,7 @@ def scan_library(job_id: int, target_movie_id: int | None = None) -> dict:
                 event_metadata={
                     "mode": result.mode,
                     "library_id": result.library_id,
+                    "server_id": library.server_id,
                     "items_scanned": result.items_scanned,
                     "items_added": result.items_added,
                     "items_updated": result.items_updated,
@@ -57,6 +59,7 @@ def scan_library(job_id: int, target_movie_id: int | None = None) -> dict:
             "ok": result.status == "completed",
             "job_id": result.id,
             "status": result.status,
+            "server_id": library.server_id,
             "items_scanned": result.items_scanned,
             "items_added": result.items_added,
             "items_updated": result.items_updated,
@@ -85,16 +88,29 @@ def refresh_plex_account() -> dict:
     with SessionLocal() as db:
         account = PlexAccountService(db)
         token = account.account_token(refresh=True)
-        refreshed_server = False
-        server = db.scalar(select(PlexServer).where(PlexServer.enabled.is_(True)).limit(1))
-        if token and server and server.server_identifier:
-            for resource in account.resources():
-                if resource.get("client_identifier") != server.server_identifier:
+        refreshed_ids: list[int] = []
+        if token:
+            resources = {
+                str(resource.get("client_identifier") or ""): resource
+                for resource in account.resources()
+            }
+            servers = db.scalars(
+                select(PlexServer).where(
+                    PlexServer.enabled.is_(True),
+                    PlexServer.server_identifier.is_not(None),
+                )
+            ).all()
+            for server in servers:
+                resource = resources.get(str(server.server_identifier or ""))
+                if not resource:
                     continue
                 access_token = str(resource.get("access_token") or "")
                 if access_token:
                     server.token_ciphertext = encrypt_secret(access_token)
-                    refreshed_server = True
-                break
+                    refreshed_ids.append(server.id)
         db.commit()
-        return {"linked": bool(token), "server_token_refreshed": refreshed_server}
+        return {
+            "linked": bool(token),
+            "server_token_refreshed": bool(refreshed_ids),
+            "refreshed_server_ids": refreshed_ids,
+        }
