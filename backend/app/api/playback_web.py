@@ -34,7 +34,7 @@ from app.services.settings import ApplicationSettingsService
 router = APIRouter(tags=["browser-playback"])
 URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 BrowserMode = Literal["direct", "compatibility"]
-BROWSER_AUDIO_CODECS = {"", "aac", "mp3"}
+BROWSER_AUDIO_CODECS = {"aac", "mp3"}
 BROWSER_DIRECT_CONTAINERS = {"mp4", "m4v"}
 
 # HLS is only used for a no-encode Direct Stream/remux or as a final full
