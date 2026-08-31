@@ -220,7 +220,8 @@ def stream(raw_token: str, request: Request, db: Session = Depends(get_db)) -> S
     def body() -> Iterator[bytes]:
         try:
             for chunk in upstream.iter_bytes(chunk_size=1024 * 1024):
-                if chunk: yield chunk
+                if chunk:
+                    yield chunk
         finally:
             upstream.close(); client.close()
 
@@ -273,12 +274,14 @@ def transcode_resource(raw_token: str, opaque: str, request: Request, db: Sessio
         return Response(rewritten, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control":"private, no-store"})
     response_headers = {"Cache-Control":"private, no-store"}
     for source, target in (("content-length","Content-Length"),("content-range","Content-Range"),("accept-ranges","Accept-Ranges")):
-        if source in upstream.headers: response_headers[target] = upstream.headers[source]
+        if source in upstream.headers:
+            response_headers[target] = upstream.headers[source]
 
     def body() -> Iterator[bytes]:
         try:
             for chunk in upstream.iter_bytes(chunk_size=1024 * 1024):
-                if chunk: yield chunk
+                if chunk:
+                    yield chunk
         finally:
             upstream.close(); client.close()
 
