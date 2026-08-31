@@ -8,6 +8,40 @@ from app.services.plex.service import PlexService
 from app.services.plex.show_scan import iter_show_library
 
 
+def _unique_tags(payload: dict) -> list[tuple[str, str]]:
+    """Normalize and deduplicate Plex metadata tags for one indexed item.
+
+    Plex can return duplicate roles/genres/labels for the same item. The
+    database intentionally enforces one (movie_id, kind, value) tuple, so
+    sanitize upstream metadata before inserting it. Case-insensitive
+    deduplication also prevents cosmetic duplicates such as "Mark Duncan" and
+    "mark duncan" while preserving the first display spelling Plex returned.
+    """
+    keys = (
+        ("genre", "genres"),
+        ("director", "directors"),
+        ("actor", "actors"),
+        ("writer", "writers"),
+        ("collection", "collections"),
+        ("label", "labels"),
+    )
+    seen: set[tuple[str, str]] = set()
+    tags: list[tuple[str, str]] = []
+    for kind, key in keys:
+        for raw_value in payload.get(key, []) or []:
+            if raw_value is None:
+                continue
+            value = str(raw_value).strip()
+            if not value:
+                continue
+            marker = (kind, value.casefold())
+            if marker in seen:
+                continue
+            seen.add(marker)
+            tags.append((kind, value))
+    return tags
+
+
 class PlexScanner:
     def __init__(self, db: Session, plex: PlexService | None = None):
         self.db = db
@@ -102,16 +136,8 @@ class PlexScanner:
                     self.db.add(MovieMedia(movie_id=media_item.id, **media))
 
                 self.db.execute(delete(MovieTag).where(MovieTag.movie_id == media_item.id))
-                for kind, key in (
-                    ("genre", "genres"),
-                    ("director", "directors"),
-                    ("actor", "actors"),
-                    ("writer", "writers"),
-                    ("collection", "collections"),
-                    ("label", "labels"),
-                ):
-                    for value in payload.get(key, []) or []:
-                        self.db.add(MovieTag(movie_id=media_item.id, kind=kind, value=value))
+                for kind, value in _unique_tags(payload):
+                    self.db.add(MovieTag(movie_id=media_item.id, kind=kind, value=value))
 
                 job.items_scanned += 1
                 if created:
