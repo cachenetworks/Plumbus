@@ -4,6 +4,7 @@ from typing import Any
 
 from plexapi.server import PlexServer as PlexApiServer
 
+from app.core.config import settings
 from app.services.plex.service import PlexService
 
 
@@ -60,6 +61,9 @@ def iter_show_library(plex: PlexService, library_key: str) -> list[dict[str, Any
     its children. Episode parent metadata is sufficient to reconstruct seasons,
     including Specials (season 0) and anime libraries with unusual layouts.
     """
+    if settings.MOCK_PLEX:
+        return plex._mock_show_rows()
+
     server = PlexApiServer(plex.base_url, plex.token, timeout=30)
     section = server.library.sectionByID(int(library_key))
     rows: list[dict[str, Any]] = []
