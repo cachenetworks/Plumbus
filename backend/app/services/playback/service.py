@@ -11,22 +11,11 @@ from app.security.security import random_token, token_hash
 from app.services.settings import ApplicationSettingsService
 
 PlaybackTarget = Literal["browser", "vrchat"]
-BROWSER_CONTAINERS = {"mp4", "m4v"}
-BROWSER_VIDEO_CODECS = {"h264", "avc"}
-BROWSER_AUDIO_CODECS = {"aac", "mp3", ""}
 
 
 class PlaybackService:
     def __init__(self, db: Session):
         self.db = db
-
-    @staticmethod
-    def browser_native_media(media: MovieMedia) -> bool:
-        return (
-            (media.container or "").lower() in BROWSER_CONTAINERS
-            and (media.video_codec or "").lower() in BROWSER_VIDEO_CODECS
-            and (media.audio_codec or "").lower() in BROWSER_AUDIO_CODECS
-        )
 
     def select_best_media(self, movie: Movie, target: PlaybackTarget = "browser") -> MovieMedia:
         prefs = ApplicationSettingsService(self.db).playback()
@@ -49,18 +38,30 @@ class PlaybackService:
             raise HTTPException(409, "No playable Plex media part is indexed for this media item")
 
         if target == "browser":
-            browser_native = [media for media in candidates if self.browser_native_media(media)]
+            browser_native = [
+                media
+                for media in candidates
+                if (media.container or "").lower() in {"mp4", "m4v"}
+                and (media.video_codec or "").lower() in {"h264", "avc"}
+                and (media.audio_codec or "").lower() in {"aac", "mp3", ""}
+                and (media.bitrate is None or media.bitrate <= max_bitrate)
+            ]
             if browser_native:
                 return browser_native[0]
 
         return candidates[0]
 
-    def get_media_info(self, media: MovieMedia) -> dict:
-        prefs = ApplicationSettingsService(self.db).playback()
+    def get_media_info(self, media: MovieMedia, prefs: dict | None = None) -> dict:
+        prefs = prefs or ApplicationSettingsService(self.db).playback()
         codec = (media.video_codec or "").lower()
         container = (media.container or "").lower()
+        audio_codec = (media.audio_codec or "").lower()
         direct_play = codec in {"h264", "avc", "hevc", "h265"} and container in {"mp4", "m4v", "mkv"}
-        browser_native = self.browser_native_media(media)
+        browser_native = (
+            codec in {"h264", "avc"}
+            and container in {"mp4", "m4v"}
+            and audio_codec in {"aac", "mp3", ""}
+        )
         bitrate_ok = media.bitrate is None or media.bitrate <= int(prefs["max_stream_bitrate_kbps"])
         preferred_codec = codec in {
             str(prefs["preferred_video_codec"]).lower(),
