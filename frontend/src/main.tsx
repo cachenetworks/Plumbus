@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { SetupWizard } from './SetupWizard'
 import './styles.css'
+import './setup.css'
 
 const Root = window.location.pathname === '/setup' ? SetupWizard : App
 
