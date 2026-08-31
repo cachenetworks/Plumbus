@@ -28,9 +28,9 @@ type PlaybackResponse = {
   delivery:'progressive'|'hls'
   expires_at:string
   resume_position_ms:number
-  stream_mode?:'direct'|'compatibility'
+  stream_mode?:'direct'|'audio'|'compatibility'
   browser_codec_profile?:string
-  media:{playback_mode?:string;resolution?:string;video_codec?:string;container?:string}
+  media:{playback_mode?:string;resolution?:string;video_codec?:string;audio_codec?:string;container?:string}
 }
 
 type EpisodeSummary = { id:number; title:string; season_number?:number; episode_number?:number }
@@ -113,7 +113,12 @@ export function WatchPage(){
       hls.loadSource(playback.playback_url)
       hls.attachMedia(video)
       hls.on(Hls.Events.ERROR,(_event,data)=>{
-        if(data.fatal)setError(`Compatibility playback error: ${data.details}`)
+        if(!data.fatal)return
+        if(playback.stream_mode==='audio'&&!compatibilityAttemptedRef.current){
+          void handleVideoError()
+          return
+        }
+        setError(`Compatibility playback error: ${data.details}`)
       })
     }else{
       video.src=playback.playback_url
@@ -158,7 +163,7 @@ export function WatchPage(){
   }
 
   async function handleVideoError(){
-    if(playback?.stream_mode==='direct'&&!compatibilityAttemptedRef.current){
+    if((playback?.stream_mode==='direct'||playback?.stream_mode==='audio')&&!compatibilityAttemptedRef.current){
       compatibilityAttemptedRef.current=true
       try{
         const fallback=await jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser?mode=compatibility`,{method:'POST'})
@@ -166,7 +171,7 @@ export function WatchPage(){
         setPlayback(fallback)
         return
       }catch(e:any){
-        setError(`The original Plex file is not supported by this browser and compatibility mode could not start: ${e.message}`)
+        setError(`Plex compatibility playback could not start: ${e.message}`)
         return
       }
     }
@@ -224,6 +229,8 @@ export function WatchPage(){
   if(loading)return <div className="watch-loading"><div className="watch-spinner"/><span>CONNECTING DIRECTLY TO PLEX...</span></div>
   if(error)return <div className="watch-error"><button onClick={exitPlayer}><ChevronLeft size={18}/> BACK</button><div><strong>PLAYBACK FAILED</strong><p>{error}</p></div></div>
 
+  const deliveryLabel=playback?.stream_mode==='direct'?'DIRECT PLEX':playback?.stream_mode==='audio'?'VIDEO COPY + AAC AUDIO':'COMPATIBILITY'
+
   return <div ref={shellRef} className={`watch-shell ${controlsVisible?'controls-visible':''}`} onMouseMove={showControls} onClick={showControls}>
     <video
       ref={videoRef}
@@ -244,7 +251,7 @@ export function WatchPage(){
     <div className="watch-topbar">
       <button className="watch-icon-btn" onClick={exitPlayer} aria-label="Exit player"><X size={28}/></button>
       <div className="watch-brand">PLUMBUS <span>// WEB PLAYER</span></div>
-      {playback&&<div className="watch-delivery">{playback.stream_mode==='direct'?'DIRECT PLEX':playback.delivery.toUpperCase()} // {playback.media?.resolution||'AUTO'}</div>}
+      {playback&&<div className="watch-delivery">{deliveryLabel} // {playback.media?.resolution||'AUTO'}</div>}
     </div>
 
     <button className="watch-center-play" onClick={togglePlay} aria-label={playing?'Pause':'Play'}>{playing?<Pause size={48}/>:<Play size={52}/>}</button>
