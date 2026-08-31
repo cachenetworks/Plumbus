@@ -26,7 +26,7 @@ class PlexScanner:
         if target_movie_id and (not target_movie or target_movie.library_id != library.id):
             job.status = "failed"
             job.finished_at = datetime.now(UTC)
-            job.last_error = "Target movie is unavailable or belongs to a different library"
+            job.last_error = "Target media is unavailable or belongs to a different library"
             self.db.commit()
             return job
 
@@ -41,29 +41,37 @@ class PlexScanner:
 
         seen_rating_keys: set[str] = set()
         try:
-            rows = plex.iter_movies(library.plex_key)
+            rows = plex.iter_items(library.plex_key, library.library_type)
             for payload in rows:
                 if target_movie and payload["rating_key"] != target_movie.rating_key:
                     continue
 
                 seen_rating_keys.add(payload["rating_key"])
-                movie = self.db.scalar(
+                media_item = self.db.scalar(
                     select(Movie).where(
                         Movie.library_id == library.id,
                         Movie.rating_key == payload["rating_key"],
                     )
                 )
-                created = movie is None
-                if movie is None:
-                    movie = Movie(
+                created = media_item is None
+                if media_item is None:
+                    media_item = Movie(
                         library_id=library.id,
                         rating_key=payload["rating_key"],
                         title=payload["title"],
+                        media_type=payload.get("media_type") or "movie",
                     )
-                    self.db.add(movie)
+                    self.db.add(media_item)
                     self.db.flush()
 
                 for field in (
+                    "media_type",
+                    "parent_rating_key",
+                    "grandparent_rating_key",
+                    "parent_title",
+                    "grandparent_title",
+                    "season_number",
+                    "episode_number",
                     "title",
                     "original_title",
                     "year",
@@ -79,16 +87,16 @@ class PlexScanner:
                     "art_key",
                 ):
                     if field in payload:
-                        setattr(movie, field, payload.get(field))
-                movie.added_at = payload.get("added_at")
-                movie.plex_updated_at = payload.get("updated_at")
-                movie.indexed_at = datetime.now(UTC)
+                        setattr(media_item, field, payload.get(field))
+                media_item.added_at = payload.get("added_at")
+                media_item.plex_updated_at = payload.get("updated_at")
+                media_item.indexed_at = datetime.now(UTC)
 
-                self.db.execute(delete(MovieMedia).where(MovieMedia.movie_id == movie.id))
+                self.db.execute(delete(MovieMedia).where(MovieMedia.movie_id == media_item.id))
                 for media in payload.get("media", []):
-                    self.db.add(MovieMedia(movie_id=movie.id, **media))
+                    self.db.add(MovieMedia(movie_id=media_item.id, **media))
 
-                self.db.execute(delete(MovieTag).where(MovieTag.movie_id == movie.id))
+                self.db.execute(delete(MovieTag).where(MovieTag.movie_id == media_item.id))
                 for kind, key in (
                     ("genre", "genres"),
                     ("director", "directors"),
@@ -98,7 +106,7 @@ class PlexScanner:
                     ("label", "labels"),
                 ):
                     for value in payload.get(key, []) or []:
-                        self.db.add(MovieTag(movie_id=movie.id, kind=kind, value=value))
+                        self.db.add(MovieTag(movie_id=media_item.id, kind=kind, value=value))
 
                 job.items_scanned += 1
                 if created:
@@ -112,9 +120,9 @@ class PlexScanner:
                     job.items_removed += 1
             else:
                 existing = self.db.scalars(select(Movie).where(Movie.library_id == library.id)).all()
-                for movie in existing:
-                    if movie.rating_key not in seen_rating_keys:
-                        self.db.delete(movie)
+                for media_item in existing:
+                    if media_item.rating_key not in seen_rating_keys:
+                        self.db.delete(media_item)
                         job.items_removed += 1
 
             library.last_scan_at = datetime.now(UTC)
