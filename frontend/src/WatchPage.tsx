@@ -28,6 +28,8 @@ type PlaybackResponse = {
   delivery:'progressive'|'hls'
   expires_at:string
   resume_position_ms:number
+  stream_mode?:'direct'|'compatibility'
+  browser_codec_profile?:string
   media:{playback_mode?:string;resolution?:string;video_codec?:string;container?:string}
 }
 
@@ -62,6 +64,7 @@ export function WatchPage(){
   const hlsRef=useRef<Hls|null>(null)
   const lastSavedRef=useRef(0)
   const resumedRef=useRef(false)
+  const compatibilityAttemptedRef=useRef(false)
   const hideTimerRef=useRef<number|null>(null)
   const [item,setItem]=useState<MediaItem|null>(null)
   const [playback,setPlayback]=useState<PlaybackResponse|null>(null)
@@ -77,11 +80,11 @@ export function WatchPage(){
 
   useEffect(()=>{
     if(!id){setError('Invalid media id');setLoading(false);return}
-    setLoading(true);setError('');setItem(null);setPlayback(null);resumedRef.current=false;lastSavedRef.current=0
+    setLoading(true);setError('');setItem(null);setPlayback(null);resumedRef.current=false;compatibilityAttemptedRef.current=false;lastSavedRef.current=0
     Promise.all([
       jsonApi<MediaItem>(`/api/movies/${id}`),
       jsonApi<NavigationResponse>(`/api/playback/media/${id}/navigation`),
-      jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser`,{method:'POST'}),
+      jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser?mode=direct`,{method:'POST'}),
     ]).then(([metadata,nav,target])=>{
       setItem(metadata);setNavigation(nav);setPlayback(target);setLoading(false)
     }).catch(e=>{setError(e.message);setLoading(false)})
@@ -110,7 +113,7 @@ export function WatchPage(){
       hls.loadSource(playback.playback_url)
       hls.attachMedia(video)
       hls.on(Hls.Events.ERROR,(_event,data)=>{
-        if(data.fatal)setError(`Playback error: ${data.details}`)
+        if(data.fatal)setError(`Compatibility playback error: ${data.details}`)
       })
     }else{
       video.src=playback.playback_url
@@ -152,6 +155,22 @@ export function WatchPage(){
     setCurrent(video.currentTime||0)
     if(video.duration)setDuration(video.duration)
     void saveProgress(false)
+  }
+
+  async function handleVideoError(){
+    if(playback?.stream_mode==='direct'&&!compatibilityAttemptedRef.current){
+      compatibilityAttemptedRef.current=true
+      try{
+        const fallback=await jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser?mode=compatibility`,{method:'POST'})
+        setError('')
+        setPlayback(fallback)
+        return
+      }catch(e:any){
+        setError(`The original Plex file is not supported by this browser and compatibility mode could not start: ${e.message}`)
+        return
+      }
+    }
+    setError('The browser could not decode this Plex stream. Try another browser/source file or use the VRChat link mode.')
   }
 
   function togglePlay(){
@@ -202,7 +221,7 @@ export function WatchPage(){
 
   useEffect(()=>()=>{if(hideTimerRef.current)window.clearTimeout(hideTimerRef.current)},[])
 
-  if(loading)return <div className="watch-loading"><div className="watch-spinner"/><span>BUFFERING MEDIA ROUTE...</span></div>
+  if(loading)return <div className="watch-loading"><div className="watch-spinner"/><span>CONNECTING DIRECTLY TO PLEX...</span></div>
   if(error)return <div className="watch-error"><button onClick={exitPlayer}><ChevronLeft size={18}/> BACK</button><div><strong>PLAYBACK FAILED</strong><p>{error}</p></div></div>
 
   return <div ref={shellRef} className={`watch-shell ${controlsVisible?'controls-visible':''}`} onMouseMove={showControls} onClick={showControls}>
@@ -217,7 +236,7 @@ export function WatchPage(){
       onPause={()=>{setPlaying(false);setControlsVisible(true);void saveProgress(true)}}
       onEnded={()=>{setPlaying(false);void jsonApi('/api/history/complete',{method:'POST',body:JSON.stringify({movie_id:id,position_ms:Math.floor((videoRef.current?.duration||0)*1000)})}).catch(()=>{});if(navigation.next)setTimeout(()=>switchEpisode(navigation.next),1200)}}
       onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}}
-      onError={()=>setError('The browser could not decode this stream. Try enabling Plex transcoding or use the VRChat link mode.')}
+      onError={()=>{void handleVideoError()}}
     />
     {item?.backdrop_url&&!playing&&<div className="watch-backdrop" style={{backgroundImage:`url(${item.backdrop_url})`}}/>}
     <div className="watch-vignette"/>
@@ -225,7 +244,7 @@ export function WatchPage(){
     <div className="watch-topbar">
       <button className="watch-icon-btn" onClick={exitPlayer} aria-label="Exit player"><X size={28}/></button>
       <div className="watch-brand">PLUMBUS <span>// WEB PLAYER</span></div>
-      {playback&&<div className="watch-delivery">{playback.delivery.toUpperCase()} // {playback.media?.resolution||'AUTO'}</div>}
+      {playback&&<div className="watch-delivery">{playback.stream_mode==='direct'?'DIRECT PLEX':playback.delivery.toUpperCase()} // {playback.media?.resolution||'AUTO'}</div>}
     </div>
 
     <button className="watch-center-play" onClick={togglePlay} aria-label={playing?'Pause':'Play'}>{playing?<Pause size={48}/>:<Play size={52}/>}</button>
