@@ -1,6 +1,6 @@
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
-import re
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -9,11 +9,11 @@ from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.db.database import get_db
 from app.models.models import AuditLog, Movie, MovieMedia, PlaybackHistory, User, UserStatus
 from app.security.secrets import decrypt_secret, encrypt_secret
 from app.security.security import get_current_user
+from app.services.configuration import IntegrationConfigurationService
 from app.services.playback.service import PlaybackService
 from app.services.plex.service import PlexService
 from app.services.settings import ApplicationSettingsService
@@ -53,23 +53,28 @@ def _plex_media_headers(plex: PlexService) -> dict[str, str]:
     return headers
 
 
-def _hls_proxy_url(raw_token: str, upstream_url: str) -> str:
+def _hls_proxy_url(public_base_url: str, raw_token: str, upstream_url: str) -> str:
     opaque = encrypt_secret(upstream_url)
-    return f"{settings.APP_URL}/stream/{raw_token}/hls/{opaque}"
+    return f"{public_base_url}/stream/{raw_token}/hls/{opaque}"
 
 
-def _rewrite_playlist(text: str, base_url: str, raw_token: str) -> str:
+def _rewrite_playlist(
+    text: str,
+    base_url: str,
+    raw_token: str,
+    public_base_url: str,
+) -> str:
     output: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
             absolute = urljoin(base_url, stripped)
-            output.append(_hls_proxy_url(raw_token, absolute))
+            output.append(_hls_proxy_url(public_base_url, raw_token, absolute))
             continue
 
         def replace(match: re.Match[str]) -> str:
             absolute = urljoin(base_url, match.group(1))
-            return f'URI="{_hls_proxy_url(raw_token, absolute)}"'
+            return f'URI="{_hls_proxy_url(public_base_url, raw_token, absolute)}"'
 
         output.append(URI_ATTRIBUTE_RE.sub(replace, line))
     return "\n".join(output) + "\n"
@@ -112,11 +117,12 @@ def create_playback(
     history.last_watched_at = datetime.now(UTC)
     history.completed = False
 
+    public_base_url = IntegrationConfigurationService(db).site().app_url
     transcode = media_info["playback_mode"] == "Transcode Required"
     playback_url = (
-        f"{settings.APP_URL}/stream/{raw}/master.m3u8"
+        f"{public_base_url}/stream/{raw}/master.m3u8"
         if transcode
-        else f"{settings.APP_URL}/stream/{raw}"
+        else f"{public_base_url}/stream/{raw}"
     )
     db.add(
         AuditLog(
@@ -222,7 +228,13 @@ def transcode_master(raw_token: str, db: Session = Depends(get_db)) -> Response:
     if response.status_code >= 400:
         raise HTTPException(502, f"Plex transcoder returned HTTP {response.status_code}")
     _assert_plex_url(plex, str(response.url))
-    rewritten = _rewrite_playlist(response.text, str(response.url), raw_token)
+    public_base_url = IntegrationConfigurationService(db).site().app_url
+    rewritten = _rewrite_playlist(
+        response.text,
+        str(response.url),
+        raw_token,
+        public_base_url,
+    )
     return Response(
         rewritten,
         media_type="application/vnd.apple.mpegurl",
@@ -265,7 +277,13 @@ def transcode_resource(
         finally:
             upstream.close()
             client.close()
-        rewritten = _rewrite_playlist(data, str(upstream.url), raw_token)
+        public_base_url = IntegrationConfigurationService(db).site().app_url
+        rewritten = _rewrite_playlist(
+            data,
+            str(upstream.url),
+            raw_token,
+            public_base_url,
+        )
         return Response(
             rewritten,
             media_type="application/vnd.apple.mpegurl",
