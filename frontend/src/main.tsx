@@ -3,7 +3,6 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom'
 import App from './App'
 import { CatalogApp } from './CatalogApp'
-import { PlaybackToolbar } from './PlaybackToolbar'
 import { SetupWizard } from './SetupWizard'
 import { WatchPage } from './WatchPage'
 import './styles.css'
@@ -26,10 +25,7 @@ function RoutedRoot(){
   const isSetup=pathname==='/setup'
   const isWatch=/^\/watch\/\d+/.test(pathname)
   const isCatalog=pathname==='/browse'||pathname==='/search'||pathname==='/collections'||/^\/(media|movie)\/\d+$/.test(pathname)
-  return <>
-    {isSetup?<SetupWizard/>:isWatch?<WatchPage/>:isCatalog?<CatalogRoutes/>:<App/>}
-    {!isSetup&&!isWatch&&<PlaybackToolbar/>}
-  </>
+  return isSetup?<SetupWizard/>:isWatch?<WatchPage/>:isCatalog?<CatalogRoutes/>:<App/>
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
