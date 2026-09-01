@@ -100,6 +100,7 @@ export function WatchPage(){
   const [error,setError]=useState('')
   const [loading,setLoading]=useState(true)
   const [playing,setPlaying]=useState(false)
+  const [hasFrame,setHasFrame]=useState(false)
   const [current,setCurrent]=useState(0)
   const [duration,setDuration]=useState(0)
   const [volume,setVolume]=useState(1)
@@ -112,19 +113,25 @@ export function WatchPage(){
 
   useEffect(()=>{
     if(!id){setError('Invalid media id');setLoading(false);return}
-    setLoading(true);setError('');setItem(null);setPlayback(null);resumedRef.current=false;compatibilityAttemptedRef.current=false;pendingSeekRef.current=null;lastSavedRef.current=0;setAudioMenuOpen(false);setCanDirectSwitch(undefined)
-    Promise.all([
-      jsonApi<MediaItem>(`/api/movies/${id}`),
-      jsonApi<NavigationResponse>(`/api/playback/media/${id}/navigation`),
-      jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser?mode=direct`,{method:'POST'}),
-    ]).then(([metadata,nav,target])=>{
-      setItem(metadata);setNavigation(nav);setPlayback(target);setLoading(false)
-    }).catch(e=>{setError(e.message);setLoading(false)})
+    setLoading(true);setError('');setItem(null);setPlayback(null);setNavigation({previous:null,next:null});setHasFrame(false);resumedRef.current=false;compatibilityAttemptedRef.current=false;pendingSeekRef.current=null;lastSavedRef.current=0;setAudioMenuOpen(false);setCanDirectSwitch(undefined)
+
+    void jsonApi<MediaItem>(`/api/movies/${id}`)
+      .then(setItem)
+      .catch(e=>setError(`Media metadata: ${e.message}`))
+
+    void jsonApi<NavigationResponse>(`/api/playback/media/${id}/navigation`)
+      .then(setNavigation)
+      .catch(()=>setNavigation({previous:null,next:null}))
+
+    jsonApi<PlaybackResponse>(`/api/playback/media/${id}/browser?mode=direct`,{method:'POST'})
+      .then(target=>{setPlayback(target);setLoading(false)})
+      .catch(e=>{setError(e.message);setLoading(false)})
   },[id])
 
   useEffect(()=>{
     const video=videoRef.current
     if(!video||!playback)return
+    setHasFrame(false)
     hlsRef.current?.destroy();hlsRef.current=null
     video.removeAttribute('src');video.load()
 
@@ -200,6 +207,7 @@ export function WatchPage(){
   function onTimeUpdate(){
     const video=videoRef.current
     if(!video)return
+    setHasFrame(true)
     setCurrent(video.currentTime||0)
     if(video.duration)setDuration(video.duration)
     void saveProgress(false)
@@ -343,6 +351,7 @@ export function WatchPage(){
       playsInline
       preload="auto"
       onLoadedMetadata={onLoadedMetadata}
+      onLoadedData={()=>setHasFrame(true)}
       onTimeUpdate={onTimeUpdate}
       onPlay={()=>{setPlaying(true);showControls()}}
       onPause={()=>{setPlaying(false);setControlsVisible(true);void saveProgress(true)}}
@@ -350,7 +359,7 @@ export function WatchPage(){
       onVolumeChange={()=>{const video=videoRef.current;if(video){setVolume(video.volume);setMuted(video.muted)}}}
       onError={()=>{void handleVideoError()}}
     />
-    {item?.backdrop_url&&!playing&&<div className="watch-backdrop" style={{backgroundImage:`url(${item.backdrop_url})`}}/>}
+    {item?.backdrop_url&&!hasFrame&&<div className="watch-backdrop" style={{backgroundImage:`url(${item.backdrop_url})`}}/>}
     <div className="watch-vignette"/>
 
     <div className="watch-topbar">
