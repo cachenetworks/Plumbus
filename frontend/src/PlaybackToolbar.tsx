@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Play, RadioTower, X } from 'lucide-react'
+import { Copy, ExternalLink, RadioTower, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
@@ -60,8 +60,7 @@ export function PlaybackToolbar(){
   }
 
   return <>
-    <div className="playback-float" aria-label={`Playback options for ${title}`}>
-      <a className="playback-float-btn netflix-play" href={`/watch/${mediaId}`}><Play size={24} fill="currentColor"/> PLAY</a>
+    <div className="playback-float" aria-label={`VRChat playback options for ${title}`}>
       <button className="playback-float-btn vrchat-action" disabled={loading} onClick={generate}><RadioTower size={19}/>{loading?'GENERATING...':'VRCHAT LINK'}</button>
     </div>
     {(result||error)&&<div className="vrchat-modal-backdrop" onClick={()=>{setResult(null);setError('')}}>
