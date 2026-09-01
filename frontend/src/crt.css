@@ -20,8 +20,24 @@
   mix-blend-mode: screen;
 }
 
-.poster-card:hover .poster-title,
-.poster-card:focus-visible .poster-title {
+.catalog-poster::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  left: 0;
+  right: 0;
+  top: -14%;
+  height: 12%;
+  opacity: 0;
+  background: linear-gradient(180deg, transparent, rgba(140,225,255,.12), rgba(255,255,255,.24), rgba(156,108,255,.12), transparent);
+  mix-blend-mode: screen;
+}
+
+.catalog-hover-play { z-index: 3; }
+
+.catalog-poster-card:hover .poster-title,
+.catalog-poster-card:focus-visible .poster-title {
   color: #f8fbff;
   letter-spacing: .012em;
   text-shadow:
@@ -32,10 +48,16 @@
   animation: crtTitleJitter 1.9s steps(1,end) infinite;
 }
 
-.poster-card:hover .poster-title::after,
-.poster-card:focus-visible .poster-title::after {
+.catalog-poster-card:hover .poster-title::after,
+.catalog-poster-card:focus-visible .poster-title::after {
   opacity: .8;
   animation: crtTitleSweep 1.35s linear infinite;
+}
+
+.catalog-poster-card:hover .catalog-poster::after,
+.catalog-poster-card:focus-visible .catalog-poster::after {
+  opacity: .7;
+  animation: crtPosterSweep 1.6s linear infinite, crtPosterFlicker 2.8s steps(1,end) infinite;
 }
 
 @keyframes crtTitleSweep {
@@ -44,6 +66,17 @@
   55% { opacity: .42; }
   92% { opacity: .7; }
   100% { top: calc(100% + 2px); opacity: 0; }
+}
+
+@keyframes crtPosterSweep {
+  0% { top: -14%; }
+  100% { top: 108%; }
+}
+
+@keyframes crtPosterFlicker {
+  0%, 12%, 15%, 44%, 47%, 78%, 81%, 100% { filter: brightness(1); }
+  13%, 45%, 79% { filter: brightness(1.18); }
+  14%, 46%, 80% { filter: brightness(.82); }
 }
 
 @keyframes crtTitleJitter {
@@ -57,16 +90,24 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .poster-card:hover .poster-title,
-  .poster-card:focus-visible .poster-title,
-  .poster-card:hover .poster-title::after,
-  .poster-card:focus-visible .poster-title::after {
+  .catalog-poster-card:hover .poster-title,
+  .catalog-poster-card:focus-visible .poster-title,
+  .catalog-poster-card:hover .poster-title::after,
+  .catalog-poster-card:focus-visible .poster-title::after,
+  .catalog-poster-card:hover .catalog-poster::after,
+  .catalog-poster-card:focus-visible .catalog-poster::after {
     animation: none;
   }
 
-  .poster-card:hover .poster-title::after,
-  .poster-card:focus-visible .poster-title::after {
+  .catalog-poster-card:hover .poster-title::after,
+  .catalog-poster-card:focus-visible .poster-title::after {
     top: 55%;
     opacity: .35;
+  }
+
+  .catalog-poster-card:hover .catalog-poster::after,
+  .catalog-poster-card:focus-visible .catalog-poster::after {
+    top: 48%;
+    opacity: .2;
   }
 }
