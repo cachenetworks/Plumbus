@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, auth, catalog_browse, catalog_status, entry, health, history, invites, movies, playback, playback_admin, playback_web, plex, settings as settings_api, setup, users, webhooks
+from app.api import audit, auth, catalog_browse, catalog_status, categories, entry, health, history, invites, movies, playback, playback_admin, playback_web, plex, settings as settings_api, setup, users, webhooks
 from app.core.config import settings
 from app.security.middleware import SecurityGateMiddleware
 
@@ -46,6 +46,7 @@ for router in (
     movies.router,
     movies.art_router,
     catalog_status.router,
+    categories.router,
     # Browser-specific playback routes intentionally come first so their
     # same-origin HLS and codec-safe handlers win over legacy route aliases.
     playback_web.router,
