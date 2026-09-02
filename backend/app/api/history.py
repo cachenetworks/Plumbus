@@ -45,11 +45,13 @@ def _history_media_payload(rows: list[PlaybackHistory], db: Session) -> list[dic
     result: list[dict] = []
     for row in rows:
         media = media_by_id.get(row.movie_id)
-        if not media:
+        movie = movie_by_id.get(row.movie_id)
+        if not media or not movie:
             continue
         result.append(
             {
                 **media,
+                "duration_ms": movie.duration_ms,
                 "position_ms": int(row.last_position_ms or 0),
                 "completed": bool(row.completed),
                 "last_watched_at": row.last_watched_at,
